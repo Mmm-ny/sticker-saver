@@ -74,3 +74,11 @@ git push origin v0.1.0
 ```
 
 iPhone 版本不能像 APK 一样从 GitHub 直接下载安装，需要在 macOS 上用 Xcode 签名安装，或通过 TestFlight 分发。
+
+## 云服务器部署
+
+推荐用 Ubuntu 云服务器 + Docker Compose。完整步骤见：
+
+```text
+docs/deploy-server.md
+```
