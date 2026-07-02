@@ -57,3 +57,19 @@ python -m unittest discover -s server -p "test_*.py"
 ```
 
 本项目没有 JavaScript 文件，因此不需要运行 `npm test`。
+
+## 发布
+
+Android APK 由 GitHub Actions 构建：
+
+- 推送到 `main` 会生成可下载的 workflow artifact。
+- 推送 `v*` 标签会创建 GitHub Release，并附带 `StickerSaver-android-debug.apk`。
+
+示例：
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+iPhone 版本不能像 APK 一样从 GitHub 直接下载安装，需要在 macOS 上用 Xcode 签名安装，或通过 TestFlight 分发。
