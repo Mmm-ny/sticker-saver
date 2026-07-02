@@ -1,0 +1,12 @@
+.gradle/
+build/
+app/build/
+*.apk
+*.aab
+*.ipa
+*.xcarchive
+DerivedData/
+ios/build/
+server/__pycache__/
+*.pyc
+outputs/
