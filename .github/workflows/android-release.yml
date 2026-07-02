@@ -52,4 +52,4 @@ jobs:
             Install notes:
             - Android may ask you to allow installing apps from unknown sources.
             - The app still needs a running StickerSaver server with a configured GIPHY_API_KEY.
-            - For real-device testing, update the app server URL to your LAN or deployed server address before building.
+            - For real-device testing, enter your LAN or deployed server address in the app.

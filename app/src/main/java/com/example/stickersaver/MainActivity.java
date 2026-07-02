@@ -44,7 +44,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
-    private static final String SERVER_BASE_URL = "http://10.0.2.2:8080";
+    private static final String DEFAULT_SERVER_BASE_URL = "http://10.0.2.2:8080";
     private static final int STORAGE_PERMISSION_REQUEST = 42;
     private static final int PICK_IMAGE_REQUEST = 43;
 
@@ -53,6 +53,7 @@ public class MainActivity extends Activity {
     private LinearLayout recentList;
     private TextView statusText;
     private EditText searchInput;
+    private EditText serverInput;
     private ProgressBar progressBar;
 
     @Override
@@ -92,6 +93,20 @@ public class MainActivity extends Activity {
         statusText.setTextColor(Color.rgb(86, 86, 86));
         statusText.setPadding(0, dp(6), 0, dp(12));
         root.addView(statusText);
+
+        serverInput = new EditText(this);
+        serverInput.setSingleLine(true);
+        serverInput.setHint("服务端地址，如 http://192.168.1.10:8080");
+        serverInput.setText(getSavedServerBaseUrl());
+        serverInput.setOnFocusChangeListener((view, hasFocus) -> {
+            if (!hasFocus) {
+                saveServerBaseUrl(serverInput.getText().toString());
+            }
+        });
+        root.addView(serverInput, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(48)
+        ));
 
         LinearLayout searchRow = new LinearLayout(this);
         searchRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -149,10 +164,11 @@ public class MainActivity extends Activity {
 
     private void search(String query, boolean silent) {
         String trimmed = query == null ? "" : query.trim();
+        saveServerBaseUrl(serverInput.getText().toString());
         setLoading(true, silent ? "正在加载热门表情..." : "正在搜索...");
         executor.execute(() -> {
             try {
-                String url = SERVER_BASE_URL + "/api/stickers/search?q=" + Uri.encode(trimmed) + "&page=1";
+                String url = getSavedServerBaseUrl() + "/api/stickers/search?q=" + Uri.encode(trimmed) + "&page=1";
                 String body = new String(downloadBytes(url, null), "UTF-8");
                 List<Sticker> stickers = parseStickers(body);
                 runOnUiThread(() -> {
@@ -438,6 +454,32 @@ public class MainActivity extends Activity {
             view.setPadding(0, dp(3), 0, dp(3));
             recentList.addView(view);
         }
+    }
+
+    private String getSavedServerBaseUrl() {
+        String value = getSharedPreferences("settings", MODE_PRIVATE)
+                .getString("serverBaseUrl", DEFAULT_SERVER_BASE_URL);
+        if (value == null || value.trim().isEmpty()) {
+            return DEFAULT_SERVER_BASE_URL;
+        }
+        return trimTrailingSlash(value.trim());
+    }
+
+    private void saveServerBaseUrl(String value) {
+        String normalized = value == null || value.trim().isEmpty()
+                ? DEFAULT_SERVER_BASE_URL
+                : trimTrailingSlash(value.trim());
+        getSharedPreferences("settings", MODE_PRIVATE)
+                .edit()
+                .putString("serverBaseUrl", normalized)
+                .apply();
+    }
+
+    private String trimTrailingSlash(String value) {
+        while (value.endsWith("/") && value.length() > "https://".length()) {
+            value = value.substring(0, value.length() - 1);
+        }
+        return value;
     }
 
     private void setLoading(boolean loading, String message) {

@@ -27,7 +27,7 @@ GET /health
 
 ## Android
 
-Android App 默认服务端地址是 `http://10.0.2.2:8080`，适合 Android 模拟器访问本机服务端。真机测试时，把 `MainActivity.SERVER_BASE_URL` 改成电脑局域网 IP 或线上服务地址。
+Android App 默认服务端地址是 `http://10.0.2.2:8080`，适合 Android 模拟器访问本机服务端。真机测试时，可以在 App 首页的“服务端地址”输入框里填写电脑局域网 IP 或线上服务地址。
 
 功能：
 
@@ -35,6 +35,7 @@ Android App 默认服务端地址是 `http://10.0.2.2:8080`，适合 Android 模
 - 预览动图
 - 保存到系统相册 `Pictures/StickerSaver/`
 - 接收其他 App 分享来的图片/GIF 并保存
+- 在 App 内配置服务端地址
 
 ## iOS
 
