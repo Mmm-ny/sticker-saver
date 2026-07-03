@@ -11,6 +11,7 @@ import sticker_server
 class StickerServerTests(unittest.TestCase):
     def setUp(self):
         sticker_server._request_log.clear()
+        sticker_server._baidu_token_cache.clear()
 
     def test_normalize_giphy_item(self):
         item = {
@@ -267,6 +268,79 @@ class StickerServerTests(unittest.TestCase):
 
         self.assertEqual(result["query"], "可爱 表情包")
         self.assertEqual(result["model"], "fallback-model")
+
+    @mock.patch.dict(
+        os.environ,
+        {
+            "OPENAI_API_KEY": "test-key",
+            "OPENAI_VISION_MODEL": "bad-model",
+            "OPENAI_VISION_FALLBACK_MODEL": "",
+            "BAIDU_API_KEY": "baidu-key",
+            "BAIDU_SECRET_KEY": "baidu-secret",
+        },
+        clear=False,
+    )
+    @mock.patch("urllib.request.urlopen")
+    def test_analyze_media_uses_baidu_when_openai_fails(self, urlopen):
+        openai_error = urllib.error.HTTPError(
+            sticker_server.OPENAI_RESPONSES_URL,
+            429,
+            "Too Many Requests",
+            {},
+            None,
+        )
+        openai_error.read = mock.Mock(return_value=b'{"error":{"message":"quota exceeded"}}')
+        token_response = mock.MagicMock()
+        token_response.__enter__().read.return_value = json.dumps(
+            {"access_token": "baidu-token", "expires_in": 3600}
+        ).encode("utf-8")
+        ocr_response = mock.MagicMock()
+        ocr_response.__enter__().read.return_value = json.dumps(
+            {"words_result": [{"words": "救命"}]}
+        ).encode("utf-8")
+        tag_response = mock.MagicMock()
+        tag_response.__enter__().read.return_value = json.dumps(
+            {"result": [{"keyword": "猫"}, {"keyword": "可爱"}]}
+        ).encode("utf-8")
+        urlopen.side_effect = [openai_error, token_response, ocr_response, tag_response]
+
+        result = sticker_server.analyze_media("abc123", "image/jpeg", "test.jpg")
+
+        self.assertEqual(result["source"], "baidu")
+        self.assertEqual(result["model"], "baidu-ocr-advanced-general")
+        self.assertEqual(result["query"], "救命 表情包")
+        self.assertIn("猫", result["visualTags"])
+        self.assertIn("quota exceeded", result["fallbackReason"])
+        self.assertEqual(urlopen.call_args_list[1].args[0].full_url.split("?", 1)[0], sticker_server.BAIDU_TOKEN_URL)
+
+    @mock.patch.dict(
+        os.environ,
+        {
+            "OPENAI_API_KEY": "",
+            "BAIDU_API_KEY": "baidu-key",
+            "BAIDU_SECRET_KEY": "baidu-secret",
+        },
+        clear=False,
+    )
+    @mock.patch("urllib.request.urlopen")
+    def test_analyze_media_uses_baidu_without_openai_key(self, urlopen):
+        token_response = mock.MagicMock()
+        token_response.__enter__().read.return_value = json.dumps(
+            {"access_token": "baidu-token", "expires_in": 3600}
+        ).encode("utf-8")
+        ocr_response = mock.MagicMock()
+        ocr_response.__enter__().read.return_value = json.dumps({"words_result": []}).encode("utf-8")
+        tag_response = mock.MagicMock()
+        tag_response.__enter__().read.return_value = json.dumps(
+            {"result": [{"keyword": "狗"}, {"keyword": "搞笑"}]}
+        ).encode("utf-8")
+        urlopen.side_effect = [token_response, ocr_response, tag_response]
+
+        result = sticker_server.analyze_media("abc123", "image/jpeg", "dog.png")
+
+        self.assertEqual(result["source"], "baidu")
+        self.assertEqual(result["query"], "狗 表情包")
+        self.assertEqual(result["searchQueries"][0], "狗 表情包")
 
 
 if __name__ == "__main__":

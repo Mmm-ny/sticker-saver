@@ -21,6 +21,9 @@ from typing import Any
 
 ALAPI_DOUTU_URL = "https://v3.alapi.cn/api/doutu"
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+BAIDU_TOKEN_URL = "https://aip.baidubce.com/oauth/2.0/token"
+BAIDU_OCR_URL = "https://aip.baidubce.com/rest/2.0/ocr/v1/general_basic"
+BAIDU_IMAGE_TAG_URL = "https://aip.baidubce.com/rest/2.0/image-classify/v2/advanced_general"
 GIPHY_SEARCH_URL = "https://api.giphy.com/v1/gifs/search"
 GIPHY_TRENDING_URL = "https://api.giphy.com/v1/gifs/trending"
 RATE_LIMIT_WINDOW_SECONDS = 60
@@ -43,6 +46,7 @@ HOT_TERM_QUERIES = {
     "塔菲": "taffy",
 }
 _request_log: dict[str, list[float]] = {}
+_baidu_token_cache: dict[str, Any] = {}
 
 
 class UpstreamError(Exception):
@@ -409,12 +413,127 @@ def _parse_keywords_text(text: str) -> dict[str, Any]:
         }
 
 
-def analyze_media(data_base64: str, mime_type: str, file_name: str = "") -> dict[str, Any]:
+def _baidu_credentials() -> tuple[str, str]:
+    api_key = os.environ.get("BAIDU_API_KEY") or os.environ.get("BAIDU_OCR_API_KEY")
+    secret_key = os.environ.get("BAIDU_SECRET_KEY") or os.environ.get("BAIDU_OCR_SECRET_KEY")
+    return (api_key or "").strip(), (secret_key or "").strip()
+
+
+def _baidu_access_token() -> str:
+    api_key, secret_key = _baidu_credentials()
+    if not api_key or not secret_key:
+        raise RuntimeError("BAIDU_API_KEY and BAIDU_SECRET_KEY are not configured")
+
+    cache_key = hashlib.sha1(f"{api_key}:{secret_key}".encode("utf-8")).hexdigest()
+    cached = _baidu_token_cache.get(cache_key)
+    now = time.time()
+    if cached and cached.get("expires_at", 0) > now + 60:
+        return str(cached["token"])
+
+    params = urllib.parse.urlencode(
+        {
+            "grant_type": "client_credentials",
+            "client_id": api_key,
+            "client_secret": secret_key,
+        }
+    )
+    request = urllib.request.Request(f"{BAIDU_TOKEN_URL}?{params}", method="POST")
+    with urllib.request.urlopen(request, timeout=10) as response:
+        raw = response.read()
+    payload = json.loads(raw.decode("utf-8"))
+    token = payload.get("access_token")
+    if not token:
+        raise UpstreamError(payload.get("error_description") or payload.get("error") or "Baidu token request failed")
+
+    expires_in = int(payload.get("expires_in") or 2592000)
+    _baidu_token_cache[cache_key] = {"token": token, "expires_at": now + expires_in}
+    return str(token)
+
+
+def _post_baidu_image(endpoint: str, token: str, data_base64: str) -> dict[str, Any]:
+    body = urllib.parse.urlencode({"image": data_base64}).encode("utf-8")
+    request = urllib.request.Request(
+        f"{endpoint}?access_token={urllib.parse.quote(token)}",
+        data=body,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=15) as response:
+        raw = response.read()
+    payload = json.loads(raw.decode("utf-8"))
+    if payload.get("error_code") or payload.get("error_msg"):
+        raise UpstreamError(f"Baidu error {payload.get('error_code')}: {payload.get('error_msg')}")
+    return payload
+
+
+def _dedupe_terms(terms: list[str], limit: int = 8) -> list[str]:
+    seen = set()
+    result = []
+    for term in terms:
+        cleaned = " ".join(str(term).strip().split())
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        result.append(cleaned)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _baidu_analyze_media(data_base64: str, file_name: str = "") -> dict[str, Any]:
+    token = _baidu_access_token()
+    ocr_payload: dict[str, Any] = {}
+    tag_payload: dict[str, Any] = {}
+    errors = []
+    try:
+        ocr_payload = _post_baidu_image(BAIDU_OCR_URL, token, data_base64)
+    except Exception as exc:
+        errors.append(f"OCR: {exc}")
+    try:
+        tag_payload = _post_baidu_image(BAIDU_IMAGE_TAG_URL, token, data_base64)
+    except Exception as exc:
+        errors.append(f"image tags: {exc}")
+
+    words = _dedupe_terms([item.get("words", "") for item in ocr_payload.get("words_result", []) if isinstance(item, dict)], 5)
+    tags = _dedupe_terms([item.get("keyword", "") for item in tag_payload.get("result", []) if isinstance(item, dict)], 6)
+    keywords = _dedupe_terms(words + tags, 8)
+    if not keywords:
+        if errors:
+            raise UpstreamError("; ".join(errors))
+        raise UpstreamError("Baidu did not return OCR text or image tags")
+
+    search_queries = []
+    for word in words[:3]:
+        search_queries.append(f"{word} 表情包")
+    if words and tags:
+        search_queries.append(f"{words[0]} {tags[0]} 表情包")
+    for tag in tags[:4]:
+        search_queries.append(f"{tag} 表情包")
+    if file_name:
+        cleaned_name = file_name.rsplit(".", 1)[0].replace("_", " ").replace("-", " ").strip()
+        if cleaned_name:
+            search_queries.append(f"{cleaned_name} 表情包")
+    search_queries = _dedupe_terms(search_queries, 5)
+    query = search_queries[0] if search_queries else f"{keywords[0]} 表情包"
+    return {
+        "query": query,
+        "keywords": keywords,
+        "characterCandidates": [],
+        "visualTags": tags,
+        "emotionTags": [],
+        "searchQueries": search_queries or [query],
+        "model": "baidu-ocr-advanced-general",
+        "source": "baidu",
+    }
+
+
+def _openai_analyze_media(data_base64: str, mime_type: str, file_name: str = "") -> dict[str, Any]:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
-    if not data_base64:
-        raise ValueError("dataBase64 is required")
 
     safe_mime = mime_type if mime_type and mime_type.startswith("image/") else "image/jpeg"
     primary_model = os.environ.get("OPENAI_VISION_MODEL", "gpt-4.1-mini")
@@ -482,7 +601,31 @@ def analyze_media(data_base64: str, mime_type: str, file_name: str = "") -> dict
     if not parsed["searchQueries"]:
         parsed["searchQueries"] = [parsed["query"]]
     parsed["model"] = used_model
+    parsed["source"] = "openai"
     return parsed
+
+
+def analyze_media(data_base64: str, mime_type: str, file_name: str = "") -> dict[str, Any]:
+    if not data_base64:
+        raise ValueError("dataBase64 is required")
+
+    errors = []
+    try:
+        return _openai_analyze_media(data_base64, mime_type, file_name)
+    except (RuntimeError, UpstreamError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        errors.append(str(exc))
+
+    try:
+        result = _baidu_analyze_media(data_base64, file_name)
+        if errors:
+            result["fallbackReason"] = "; ".join(errors)
+        return result
+    except RuntimeError as exc:
+        errors.append(str(exc))
+    except (UpstreamError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        errors.append(str(exc))
+
+    raise UpstreamError("; ".join(error for error in errors if error) or "media analysis failed")
 
 
 class StickerHandler(BaseHTTPRequestHandler):
