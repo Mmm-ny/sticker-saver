@@ -66,6 +66,7 @@ GIPHY_API_KEY=你的真实GIPHY_API_KEY
 ALAPI_TOKEN=
 OPENAI_API_KEY=
 OPENAI_VISION_MODEL=gpt-4.1-mini
+OPENAI_VISION_FALLBACK_MODEL=gpt-4o-mini
 ```
 
 如果已经在 ALAPI 申请了“斗图表情包”接口，把 `ALAPI_TOKEN` 改成你的真实 token。服务端会优先搜索 ALAPI，没配置、无结果或接口失败时自动回退到 GIPHY。

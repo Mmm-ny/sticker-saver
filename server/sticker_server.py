@@ -45,6 +45,10 @@ HOT_TERM_QUERIES = {
 _request_log: dict[str, list[float]] = {}
 
 
+class UpstreamError(Exception):
+    pass
+
+
 def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
@@ -344,6 +348,21 @@ def _extract_openai_text(payload: dict[str, Any]) -> str:
     return "\n".join(parts).strip()
 
 
+def _openai_error_message(exc: urllib.error.HTTPError) -> str:
+    try:
+        body = exc.read().decode("utf-8", errors="replace")
+    except Exception:
+        body = ""
+    if not body:
+        return f"OpenAI HTTP {exc.code}: {exc.reason}"
+    try:
+        payload = json.loads(body)
+        message = payload.get("error", {}).get("message") or body
+    except json.JSONDecodeError:
+        message = body
+    return f"OpenAI HTTP {exc.code}: {message}"
+
+
 def _coerce_string_list(value: Any) -> list[str]:
     if isinstance(value, str):
         return [value.strip()] if value.strip() else []
@@ -394,7 +413,8 @@ def analyze_media(data_base64: str, mime_type: str, file_name: str = "") -> dict
         raise ValueError("dataBase64 is required")
 
     safe_mime = mime_type if mime_type and mime_type.startswith("image/") else "image/jpeg"
-    model = os.environ.get("OPENAI_VISION_MODEL", "gpt-4.1-mini")
+    primary_model = os.environ.get("OPENAI_VISION_MODEL", "gpt-4.1-mini")
+    fallback_model = os.environ.get("OPENAI_VISION_FALLBACK_MODEL", "gpt-4o-mini")
     prompt = (
         "你是高级中文表情包搜索策划器。观察这张图片或视频截图，生成更像抖音、QQ、微信斗图场景会用的搜索词。"
         "优先级：1. 如果能较确定识别动漫/影视/游戏角色或作品 IP，先给角色名或作品名；"
@@ -410,38 +430,54 @@ def analyze_media(data_base64: str, mime_type: str, file_name: str = "") -> dict
     )
     if file_name:
         prompt += f" 文件名：{file_name}"
-    body = {
-        "model": model,
-        "input": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": prompt},
-                    {"type": "input_image", "image_url": f"data:{safe_mime};base64,{data_base64}"},
-                ],
-            }
-        ],
-        "max_output_tokens": 180,
-    }
-    request = urllib.request.Request(
-        OPENAI_RESPONSES_URL,
-        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        raw = response.read()
-    payload = json.loads(raw.decode("utf-8"))
+    last_error = ""
+    payload = None
+    used_model = primary_model
+    models = [primary_model]
+    if fallback_model and fallback_model != primary_model:
+        models.append(fallback_model)
+    for model in models:
+        body = {
+            "model": model,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": prompt},
+                        {"type": "input_image", "image_url": f"data:{safe_mime};base64,{data_base64}"},
+                    ],
+                }
+            ],
+            "max_output_tokens": 180,
+        }
+        request = urllib.request.Request(
+            OPENAI_RESPONSES_URL,
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                raw = response.read()
+            payload = json.loads(raw.decode("utf-8"))
+            used_model = model
+            break
+        except urllib.error.HTTPError as exc:
+            last_error = _openai_error_message(exc)
+            if exc.code not in (400, 404):
+                break
+    if payload is None:
+        raise UpstreamError(last_error or "OpenAI request failed")
     parsed = _parse_keywords_text(_extract_openai_text(payload))
     if not parsed["query"]:
         parsed["query"] = "热门 表情包"
     if not parsed["searchQueries"]:
         parsed["searchQueries"] = [parsed["query"]]
-    parsed["model"] = model
+    parsed["model"] = used_model
     return parsed
 
 
@@ -490,7 +526,7 @@ class StickerHandler(BaseHTTPRequestHandler):
         except RuntimeError as exc:
             _json_response(self, 500, {"error": "not_configured", "message": str(exc)})
             return
-        except (urllib.error.URLError, TimeoutError) as exc:
+        except (UpstreamError, urllib.error.URLError, TimeoutError) as exc:
             _json_response(self, 502, {"error": "upstream_failed", "message": str(exc)})
             return
         except json.JSONDecodeError:

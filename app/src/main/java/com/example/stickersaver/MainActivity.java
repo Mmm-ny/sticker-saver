@@ -474,7 +474,7 @@ public class MainActivity extends Activity {
             } catch (Exception exception) {
                 runOnUiThread(() -> {
                     setLoading(false, "画面识别不可用，已使用文件名生成搜索词");
-                    showSearchKeywordDialog(fallback, "视觉识别暂不可用，已根据文件名生成关键词，可修改后搜索。");
+                    showSearchKeywordDialog(fallback, "视觉识别暂不可用：" + exception.getMessage() + "\n已根据文件名生成关键词，可修改后搜索。");
                 });
             }
         });

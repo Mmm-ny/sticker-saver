@@ -1,6 +1,7 @@
 import json
 import os
 import urllib.parse
+import urllib.error
 import unittest
 from unittest import mock
 
@@ -203,7 +204,11 @@ class StickerServerTests(unittest.TestCase):
 
         self.assertEqual(result["source"], "GIPHY")
 
-    @mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key", "OPENAI_VISION_MODEL": "test-model"}, clear=False)
+    @mock.patch.dict(
+        os.environ,
+        {"OPENAI_API_KEY": "test-key", "OPENAI_VISION_MODEL": "test-model", "OPENAI_VISION_FALLBACK_MODEL": ""},
+        clear=False,
+    )
     @mock.patch("urllib.request.urlopen")
     def test_analyze_media_calls_openai(self, urlopen):
         payload = {
@@ -236,6 +241,32 @@ class StickerServerTests(unittest.TestCase):
         body = json.loads(request.data.decode("utf-8"))
         self.assertEqual(body["model"], "test-model")
         self.assertIn("data:image/jpeg;base64,abc123", body["input"][0]["content"][1]["image_url"])
+
+    @mock.patch.dict(
+        os.environ,
+        {"OPENAI_API_KEY": "test-key", "OPENAI_VISION_MODEL": "bad-model", "OPENAI_VISION_FALLBACK_MODEL": "fallback-model"},
+        clear=False,
+    )
+    @mock.patch("urllib.request.urlopen")
+    def test_analyze_media_falls_back_for_model_error(self, urlopen):
+        error = urllib.error.HTTPError(
+            sticker_server.OPENAI_RESPONSES_URL,
+            404,
+            "Not Found",
+            {},
+            None,
+        )
+        error.read = mock.Mock(return_value=b'{"error":{"message":"model not found"}}')
+        success = mock.MagicMock()
+        success.__enter__().read.return_value = json.dumps(
+            {"output": [{"content": [{"text": '{"query":"可爱 表情包","keywords":["可爱"]}'}]}]}
+        ).encode("utf-8")
+        urlopen.side_effect = [error, success]
+
+        result = sticker_server.analyze_media("abc123", "image/jpeg", "test.jpg")
+
+        self.assertEqual(result["query"], "可爱 表情包")
+        self.assertEqual(result["model"], "fallback-model")
 
 
 if __name__ == "__main__":
