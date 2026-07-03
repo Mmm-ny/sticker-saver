@@ -2,11 +2,13 @@ package com.example.stickersaver;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.graphics.Canvas;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -16,6 +18,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.provider.OpenableColumns;
 import android.provider.MediaStore;
 import android.text.TextUtils;
 import android.view.Gravity;
@@ -48,15 +51,19 @@ import java.util.concurrent.Executors;
 public class MainActivity extends Activity {
     private static final String DEFAULT_SERVER_BASE_URL = "http://10.0.2.2:8080";
     private static final int STORAGE_PERMISSION_REQUEST = 42;
-    private static final int PICK_IMAGE_REQUEST = 43;
+    private static final int PICK_MEDIA_SEARCH_REQUEST = 43;
 
     private final ExecutorService executor = Executors.newFixedThreadPool(4);
+    private final List<Sticker> currentStickers = new ArrayList<>();
     private LinearLayout resultsList;
     private LinearLayout recentList;
     private TextView statusText;
     private EditText searchInput;
     private EditText serverInput;
     private ProgressBar progressBar;
+    private Button loadMoreButton;
+    private String currentQuery = "";
+    private int currentPage = 1;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -129,8 +136,8 @@ public class MainActivity extends Activity {
         searchRow.addView(searchButton, new LinearLayout.LayoutParams(dp(88), dp(48)));
 
         Button pickButton = new Button(this);
-        pickButton.setText("选择本地 GIF/图片保存");
-        pickButton.setOnClickListener(v -> pickLocalImage());
+        pickButton.setText("选择本地图片/视频搜索");
+        pickButton.setOnClickListener(v -> pickLocalMediaForSearch());
         root.addView(pickButton, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 dp(48)
@@ -152,6 +159,15 @@ public class MainActivity extends Activity {
         resultsList.setOrientation(LinearLayout.VERTICAL);
         root.addView(resultsList);
 
+        loadMoreButton = new Button(this);
+        loadMoreButton.setText("加载更多");
+        loadMoreButton.setVisibility(View.GONE);
+        loadMoreButton.setOnClickListener(v -> loadMoreResults());
+        root.addView(loadMoreButton, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(48)
+        ));
+
         setContentView(scrollView);
     }
 
@@ -166,20 +182,47 @@ public class MainActivity extends Activity {
 
     private void search(String query, boolean silent) {
         String trimmed = query == null ? "" : query.trim();
+        currentQuery = trimmed;
+        currentPage = 1;
+        currentStickers.clear();
+        renderResults(currentStickers);
+        searchInput.setText(trimmed);
+        searchPage(trimmed, currentPage, false, silent);
+    }
+
+    private void loadMoreResults() {
+        if (TextUtils.isEmpty(currentQuery)) {
+            currentQuery = searchInput.getText().toString().trim();
+        }
+        searchPage(currentQuery, currentPage + 1, true, false);
+    }
+
+    private void searchPage(String query, int page, boolean append, boolean silent) {
+        String trimmed = query == null ? "" : query.trim();
         saveServerBaseUrl(serverInput.getText().toString());
-        setLoading(true, silent ? "正在加载热门表情..." : "正在搜索...");
+        loadMoreButton.setEnabled(false);
+        setLoading(true, append ? "正在加载更多..." : silent ? "正在加载热门表情..." : "正在搜索...");
         executor.execute(() -> {
             try {
-                String url = getSavedServerBaseUrl() + "/api/stickers/search?q=" + Uri.encode(trimmed) + "&page=1";
+                String url = getSavedServerBaseUrl() + "/api/stickers/search?q=" + Uri.encode(trimmed) + "&page=" + page;
                 String body = new String(downloadBytes(url, null), "UTF-8");
                 List<Sticker> stickers = parseStickers(body);
                 runOnUiThread(() -> {
-                    setLoading(false, stickers.isEmpty() ? "没有找到结果，换个关键词试试" : "找到 " + stickers.size() + " 个表情");
-                    renderResults(stickers);
+                    if (!append) {
+                        currentStickers.clear();
+                    }
+                    currentStickers.addAll(stickers);
+                    currentPage = page;
+                    setLoading(false, currentStickers.isEmpty() ? "没有找到结果，换个关键词试试" : "已显示 " + currentStickers.size() + " 个表情");
+                    renderResults(currentStickers);
+                    loadMoreButton.setVisibility(currentStickers.isEmpty() ? View.GONE : View.VISIBLE);
+                    loadMoreButton.setEnabled(!stickers.isEmpty());
+                    loadMoreButton.setText(stickers.isEmpty() ? "没有更多结果" : "加载更多");
                 });
             } catch (Exception exception) {
                 runOnUiThread(() -> {
                     setLoading(false, "搜索失败：" + exception.getMessage());
+                    loadMoreButton.setEnabled(true);
                     Toast.makeText(this, "搜索失败，请确认服务端已启动", Toast.LENGTH_LONG).show();
                 });
             }
@@ -355,18 +398,19 @@ public class MainActivity extends Activity {
         return uri;
     }
 
-    private void pickLocalImage() {
+    private void pickLocalMediaForSearch() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("image/*");
-        startActivityForResult(intent, PICK_IMAGE_REQUEST);
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/*"});
+        startActivityForResult(intent, PICK_MEDIA_SEARCH_REQUEST);
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == PICK_IMAGE_REQUEST && resultCode == RESULT_OK && data != null && data.getData() != null) {
-            saveSharedUri(data.getData());
+        if (requestCode == PICK_MEDIA_SEARCH_REQUEST && resultCode == RESULT_OK && data != null && data.getData() != null) {
+            promptSearchFromLocalMedia(data.getData());
         }
     }
 
@@ -378,7 +422,7 @@ public class MainActivity extends Activity {
         if (Intent.ACTION_SEND.equals(action)) {
             Uri stream = intent.getParcelableExtra(Intent.EXTRA_STREAM);
             if (stream != null) {
-                saveSharedUri(stream);
+                promptSearchFromLocalMedia(stream);
                 return;
             }
             CharSequence text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
@@ -387,12 +431,57 @@ public class MainActivity extends Activity {
             }
         } else if (Intent.ACTION_SEND_MULTIPLE.equals(action)) {
             ArrayList<Uri> streams = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
-            if (streams != null) {
-                for (Uri uri : streams) {
-                    saveSharedUri(uri);
-                }
+            if (streams != null && !streams.isEmpty()) {
+                promptSearchFromLocalMedia(streams.get(0));
             }
         }
+    }
+
+    private void promptSearchFromLocalMedia(Uri uri) {
+        String suggested = guessSearchKeyword(uri);
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setText(suggested);
+        input.setSelectAllOnFocus(true);
+        new AlertDialog.Builder(this)
+                .setTitle("根据本地媒体搜索")
+                .setMessage("当前版本会根据文件名生成关键词。请确认或修改后搜索相似表情。")
+                .setView(input)
+                .setPositiveButton("搜索", (dialog, which) -> search(input.getText().toString(), false))
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private String guessSearchKeyword(Uri uri) {
+        String name = getDisplayName(uri);
+        if (TextUtils.isEmpty(name)) {
+            return "热门 表情包";
+        }
+        int dot = name.lastIndexOf('.');
+        if (dot > 0) {
+            name = name.substring(0, dot);
+        }
+        name = name.replaceAll("[_\\-]+", " ").replaceAll("\\s+", " ").trim();
+        String lower = name.toLowerCase(Locale.US);
+        if (lower.matches("(img|image|video|vid|screenshot|screenrecord|mmexport|wx_camera).*")
+                || lower.matches("\\d+")) {
+            return "热门 表情包";
+        }
+        return name;
+    }
+
+    private String getDisplayName(Uri uri) {
+        try (Cursor cursor = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (index >= 0) {
+                    return cursor.getString(index);
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        String path = uri.getLastPathSegment();
+        return path == null ? "" : path;
     }
 
     private void saveSharedUri(Uri uri) {
