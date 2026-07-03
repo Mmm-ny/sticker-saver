@@ -22,6 +22,21 @@ GIPHY_SEARCH_URL = "https://api.giphy.com/v1/gifs/search"
 GIPHY_TRENDING_URL = "https://api.giphy.com/v1/gifs/trending"
 RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_MAX_REQUESTS = 30
+HOT_TERM_QUERIES = {
+    "哈哈": "lol laughing reaction",
+    "笑死": "lol laughing meme",
+    "绷不住": "cant stop laughing reaction",
+    "破防": "crying emotional damage reaction",
+    "无语": "speechless facepalm reaction",
+    "谢谢": "thank you cute reaction",
+    "离谱": "confused what reaction meme",
+    "绝绝子": "amazing awesome reaction",
+    "yyds": "goat best ever reaction",
+    "尊嘟假嘟": "really confused reaction",
+    "吗喽": "monkey reaction meme",
+    "鼠鼠": "cute mouse reaction",
+    "塔菲": "taffy vtuber anime reaction",
+}
 _request_log: dict[str, list[float]] = {}
 
 
@@ -63,6 +78,50 @@ def _pick_image(images: dict[str, Any], *names: str) -> dict[str, Any]:
     return {}
 
 
+def resolve_search_query(query: str) -> tuple[str, str]:
+    normalized = query.strip().lower()
+    if normalized in HOT_TERM_QUERIES:
+        return HOT_TERM_QUERIES[normalized], "hot_term"
+    return query.strip(), "direct"
+
+
+def _parse_giphy_datetime(value: str) -> float:
+    if not value or value.startswith("0000-00-00"):
+        return 0
+    try:
+        parsed = time.strptime(value, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return 0
+    return time.mktime(parsed)
+
+
+def _contains_query_hint(item: dict[str, Any], query: str) -> bool:
+    title = (item.get("title") or "").lower()
+    slug = (item.get("slug") or "").lower()
+    for token in query.lower().replace("-", " ").split():
+        if len(token) >= 3 and (token in title or token in slug):
+            return True
+    return False
+
+
+def _rank_giphy_items(items: list[dict[str, Any]], resolved_query: str) -> list[dict[str, Any]]:
+    now = time.time()
+    scored = []
+    for index, item in enumerate(items):
+        import_time = _parse_giphy_datetime(item.get("import_datetime", ""))
+        trending_time = _parse_giphy_datetime(item.get("trending_datetime", ""))
+        recency_time = max(import_time, trending_time)
+        age_days = (now - recency_time) / 86400 if recency_time else 3650
+        recency_score = max(0, 220 - min(age_days, 365) * 0.6)
+        trend_score = 180 if trending_time else 0
+        query_score = 120 if _contains_query_hint(item, resolved_query) else 0
+        giphy_order_score = max(0, 1000 - index * 14)
+        score = giphy_order_score + recency_score + trend_score + query_score
+        scored.append((score, item))
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [item for _, item in scored]
+
+
 def normalize_giphy_item(item: dict[str, Any]) -> dict[str, Any]:
     images = item.get("images") or {}
     original = _pick_image(images, "original")
@@ -77,6 +136,8 @@ def normalize_giphy_item(item: dict[str, Any]) -> dict[str, Any]:
         "height": int(original.get("height") or preview.get("height") or 0),
         "mimeType": "image/gif",
         "pageUrl": item.get("url", ""),
+        "importDatetime": item.get("import_datetime", ""),
+        "trendingDatetime": item.get("trending_datetime", ""),
     }
 
 
@@ -86,26 +147,33 @@ def search_giphy(query: str, page: int, limit: int = 24) -> dict[str, Any]:
         raise RuntimeError("GIPHY_API_KEY is not configured")
 
     page = max(page, 1)
+    resolved_query, queryMode = resolve_search_query(query)
+    fetch_limit = min(max(limit * 2, limit), 50)
     params = {
         "api_key": api_key,
-        "limit": str(limit),
-        "offset": str((page - 1) * limit),
+        "limit": str(fetch_limit),
+        "offset": str((page - 1) * fetch_limit),
         "rating": "pg-13",
         "lang": "zh-CN",
     }
     url = GIPHY_TRENDING_URL
-    if query:
-        params["q"] = query
+    if resolved_query:
+        params["q"] = resolved_query
         url = GIPHY_SEARCH_URL
 
     request_url = f"{url}?{urllib.parse.urlencode(params)}"
     with urllib.request.urlopen(request_url, timeout=12) as response:
         raw = response.read()
     payload = json.loads(raw.decode("utf-8"))
+    ranked_items = _rank_giphy_items(payload.get("data", []), resolved_query)[:limit]
     return {
-        "items": [normalize_giphy_item(item) for item in payload.get("data", [])],
+        "items": [normalize_giphy_item(item) for item in ranked_items],
         "page": page,
         "source": "GIPHY",
+        "query": query,
+        "resolvedQuery": resolved_query,
+        "queryMode": queryMode,
+        "sortMode": "giphy_popularity_recency_proxy",
     }
 
 
