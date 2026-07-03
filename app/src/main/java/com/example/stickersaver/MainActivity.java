@@ -453,10 +453,11 @@ public class MainActivity extends Activity {
                         .toString();
                 String response = postJson(getSavedServerBaseUrl() + "/api/stickers/analyze-media", body);
                 JSONObject root = new JSONObject(response);
-                String query = root.optString("query", fallback);
+                String query = pickBestAnalysisQuery(root, fallback);
+                String details = buildAnalysisMessage(root, "已根据图片/视频画面生成关键词，可修改后搜索。");
                 runOnUiThread(() -> {
                     setLoading(false, "已根据画面生成搜索词");
-                    showSearchKeywordDialog(query, "已根据图片/视频画面生成关键词，可修改后搜索。");
+                    showSearchKeywordDialog(query, details);
                 });
             } catch (Exception exception) {
                 runOnUiThread(() -> {
@@ -465,6 +466,43 @@ public class MainActivity extends Activity {
                 });
             }
         });
+    }
+
+    private String pickBestAnalysisQuery(JSONObject root, String fallback) {
+        JSONArray queries = root.optJSONArray("searchQueries");
+        if (queries != null) {
+            for (int i = 0; i < queries.length(); i++) {
+                String query = queries.optString(i, "").trim();
+                if (!TextUtils.isEmpty(query)) {
+                    return query;
+                }
+            }
+        }
+        String query = root.optString("query", "").trim();
+        return TextUtils.isEmpty(query) ? fallback : query;
+    }
+
+    private String buildAnalysisMessage(JSONObject root, String intro) {
+        StringBuilder message = new StringBuilder(intro);
+        appendJsonArrayLine(message, "可能角色/IP", root.optJSONArray("characterCandidates"));
+        appendJsonArrayLine(message, "备用搜索", root.optJSONArray("searchQueries"));
+        return message.toString();
+    }
+
+    private void appendJsonArrayLine(StringBuilder builder, String label, JSONArray values) {
+        if (values == null || values.length() == 0) {
+            return;
+        }
+        List<String> parts = new ArrayList<>();
+        for (int i = 0; i < Math.min(values.length(), 3); i++) {
+            String value = values.optString(i, "").trim();
+            if (!TextUtils.isEmpty(value)) {
+                parts.add(value);
+            }
+        }
+        if (!parts.isEmpty()) {
+            builder.append("\n").append(label).append("：").append(TextUtils.join(" / ", parts));
+        }
     }
 
     private void showSearchKeywordDialog(String suggested, String message) {

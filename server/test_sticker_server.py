@@ -69,10 +69,14 @@ class StickerServerTests(unittest.TestCase):
         self.assertEqual(result["mimeType"], "image/webp")
 
     def test_parse_keywords_text_json(self):
-        query, keywords = sticker_server._parse_keywords_text('{"query":"大笑 哈哈","keywords":["大笑","哈哈"]}')
+        parsed = sticker_server._parse_keywords_text(
+            '{"query":"大笑 哈哈","searchQueries":["大笑 哈哈 表情包"],"keywords":["大笑","哈哈"],"characterCandidates":["蜡笔小新"]}'
+        )
 
-        self.assertEqual(query, "大笑 哈哈")
-        self.assertEqual(keywords, ["大笑", "哈哈"])
+        self.assertEqual(parsed["query"], "大笑 哈哈")
+        self.assertEqual(parsed["keywords"], ["大笑", "哈哈"])
+        self.assertEqual(parsed["searchQueries"], ["大笑 哈哈", "大笑 哈哈 表情包"])
+        self.assertEqual(parsed["characterCandidates"], ["蜡笔小新"])
 
     def test_extract_openai_text_from_output(self):
         payload = {
@@ -188,7 +192,14 @@ class StickerServerTests(unittest.TestCase):
             "output": [
                 {
                     "content": [
-                        {"text": '{"query":"开心 大笑","keywords":["开心","大笑"]}'}
+                        {
+                            "text": (
+                                '{"query":"初音未来 微笑 表情包",'
+                                '"searchQueries":["初音未来 微笑 表情包","蓝发双马尾 微笑 表情包"],'
+                                '"keywords":["初音未来","微笑"],'
+                                '"characterCandidates":["初音未来"]}'
+                            )
+                        }
                     ]
                 }
             ]
@@ -197,8 +208,10 @@ class StickerServerTests(unittest.TestCase):
 
         result = sticker_server.analyze_media("abc123", "image/jpeg", "test.jpg")
 
-        self.assertEqual(result["query"], "开心 大笑")
-        self.assertEqual(result["keywords"], ["开心", "大笑"])
+        self.assertEqual(result["query"], "初音未来 微笑 表情包")
+        self.assertEqual(result["keywords"], ["初音未来", "微笑"])
+        self.assertEqual(result["characterCandidates"], ["初音未来"])
+        self.assertEqual(result["searchQueries"][0], "初音未来 微笑 表情包")
         request = urlopen.call_args.args[0]
         self.assertEqual(request.full_url, sticker_server.OPENAI_RESPONSES_URL)
         self.assertEqual(request.headers["Authorization"], "Bearer test-key")

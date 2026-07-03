@@ -292,7 +292,15 @@ def _extract_openai_text(payload: dict[str, Any]) -> str:
     return "\n".join(parts).strip()
 
 
-def _parse_keywords_text(text: str) -> tuple[str, list[str]]:
+def _coerce_string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
+def _parse_keywords_text(text: str) -> dict[str, Any]:
     stripped = text.strip()
     if stripped.startswith("```"):
         stripped = stripped.strip("`")
@@ -300,15 +308,30 @@ def _parse_keywords_text(text: str) -> tuple[str, list[str]]:
             stripped = stripped[4:].strip()
     try:
         payload = json.loads(stripped)
-        keywords = payload.get("keywords") or []
-        if isinstance(keywords, str):
-            keywords = [keywords]
-        cleaned = [str(keyword).strip() for keyword in keywords if str(keyword).strip()]
+        cleaned = _coerce_string_list(payload.get("keywords") or [])
         query = str(payload.get("query") or " ".join(cleaned[:3])).strip()
-        return query, cleaned
+        search_queries = _coerce_string_list(payload.get("searchQueries") or [])
+        if query and query not in search_queries:
+            search_queries.insert(0, query)
+        return {
+            "query": query,
+            "keywords": cleaned,
+            "characterCandidates": _coerce_string_list(payload.get("characterCandidates") or []),
+            "visualTags": _coerce_string_list(payload.get("visualTags") or []),
+            "emotionTags": _coerce_string_list(payload.get("emotionTags") or []),
+            "searchQueries": search_queries[:5],
+        }
     except json.JSONDecodeError:
         cleaned = [part.strip() for part in stripped.replace("，", ",").replace("\n", ",").split(",") if part.strip()]
-        return " ".join(cleaned[:3]), cleaned
+        query = " ".join(cleaned[:3])
+        return {
+            "query": query,
+            "keywords": cleaned,
+            "characterCandidates": [],
+            "visualTags": [],
+            "emotionTags": [],
+            "searchQueries": [query] if query else [],
+        }
 
 
 def analyze_media(data_base64: str, mime_type: str, file_name: str = "") -> dict[str, Any]:
@@ -321,10 +344,17 @@ def analyze_media(data_base64: str, mime_type: str, file_name: str = "") -> dict
     safe_mime = mime_type if mime_type and mime_type.startswith("image/") else "image/jpeg"
     model = os.environ.get("OPENAI_VISION_MODEL", "gpt-4.1-mini")
     prompt = (
-        "你是中文表情包搜索助手。观察这张图片或视频截图，提取适合在中文表情包网站搜索的关键词。"
-        "优先关注人物、表情、情绪、动作、梗、字幕含义。"
-        "返回严格 JSON：{\"query\":\"2到6个中文搜索词\",\"keywords\":[\"词1\",\"词2\",\"词3\"]}。"
-        "不要解释，不要 Markdown。"
+        "你是高级中文表情包搜索策划器。观察这张图片或视频截图，生成更像抖音、QQ、微信斗图场景会用的搜索词。"
+        "优先级：1. 如果能较确定识别动漫/影视/游戏角色或作品 IP，先给角色名或作品名；"
+        "2. 再补充情绪、动作、台词含义、外观特征；3. 如果角色不确定，不要硬猜，只用外观特征和情绪。"
+        "返回严格 JSON，不要解释，不要 Markdown。格式："
+        "{\"query\":\"最推荐搜索词\","
+        "\"searchQueries\":[\"角色名 情绪 表情包\",\"作品名 表情包\",\"外观特征 情绪 表情包\"],"
+        "\"characterCandidates\":[\"可能角色或IP\"],"
+        "\"visualTags\":[\"发色\",\"服装\",\"场景\"],"
+        "\"emotionTags\":[\"微笑\",\"挥手\"],"
+        "\"keywords\":[\"用于搜索的短词\"]}。"
+        "searchQueries 最多 5 个，优先中文，关键词要短，适合表情包搜索。"
     )
     if file_name:
         prompt += f" 文件名：{file_name}"
@@ -354,12 +384,13 @@ def analyze_media(data_base64: str, mime_type: str, file_name: str = "") -> dict
     with urllib.request.urlopen(request, timeout=30) as response:
         raw = response.read()
     payload = json.loads(raw.decode("utf-8"))
-    query, keywords = _parse_keywords_text(_extract_openai_text(payload))
-    return {
-        "query": query or "热门 表情包",
-        "keywords": keywords,
-        "model": model,
-    }
+    parsed = _parse_keywords_text(_extract_openai_text(payload))
+    if not parsed["query"]:
+        parsed["query"] = "热门 表情包"
+    if not parsed["searchQueries"]:
+        parsed["searchQueries"] = [parsed["query"]]
+    parsed["model"] = model
+    return parsed
 
 
 class StickerHandler(BaseHTTPRequestHandler):
