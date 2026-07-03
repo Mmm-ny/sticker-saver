@@ -8,6 +8,8 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Canvas;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Movie;
 import android.net.Uri;
@@ -516,6 +518,7 @@ public class MainActivity extends Activity {
 
     public static class GifMovieView extends View {
         private Movie movie;
+        private Bitmap bitmap;
         private long startTime;
 
         public GifMovieView(android.content.Context context) {
@@ -524,6 +527,7 @@ public class MainActivity extends Activity {
 
         public void setBytes(byte[] bytes) {
             movie = Movie.decodeByteArray(bytes, 0, bytes.length);
+            bitmap = movie == null ? BitmapFactory.decodeByteArray(bytes, 0, bytes.length) : null;
             startTime = android.os.SystemClock.uptimeMillis();
             invalidate();
         }
@@ -532,6 +536,10 @@ public class MainActivity extends Activity {
         protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
             if (movie == null) {
+                if (bitmap != null) {
+                    drawBitmapCentered(canvas);
+                    return;
+                }
                 canvas.drawColor(Color.rgb(245, 245, 245));
                 return;
             }
@@ -551,6 +559,18 @@ public class MainActivity extends Activity {
             movie.draw(canvas, 0, 0);
             canvas.restore();
             invalidate();
+        }
+
+        private void drawBitmapCentered(Canvas canvas) {
+            float scale = Math.min(
+                    getWidth() / Math.max(1f, bitmap.getWidth()),
+                    getHeight() / Math.max(1f, bitmap.getHeight())
+            );
+            canvas.save();
+            canvas.translate((getWidth() - bitmap.getWidth() * scale) / 2f, (getHeight() - bitmap.getHeight() * scale) / 2f);
+            canvas.scale(scale, scale);
+            canvas.drawBitmap(bitmap, 0, 0, null);
+            canvas.restore();
         }
     }
 }
