@@ -82,3 +82,17 @@ iPhone 版本不能像 APK 一样从 GitHub 直接下载安装，需要在 macOS
 ```text
 docs/deploy-server.md
 ```
+
+当前测试服务端：
+
+```text
+http://47.76.154.20:8080
+```
+
+Android App 安装包：
+
+```text
+https://github.com/Mmm-ny/sticker-saver/releases/download/v0.1.1/StickerSaver-android-debug.apk
+```
+
+安装后在 App 首页的“服务端地址”填写当前测试服务端地址即可。服务器 `.env` 中的 `GIPHY_API_KEY` 不提交到 GitHub。
