@@ -55,9 +55,11 @@ def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[s
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Access-Control-Allow-Origin", "*")
     handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Connection", "close")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
+    handler.close_connection = True
 
 
 def _client_id(handler: BaseHTTPRequestHandler) -> str:
@@ -331,9 +333,11 @@ def _binary_response(handler: BaseHTTPRequestHandler, status: int, data: bytes, 
     handler.send_header("Content-Type", content_type)
     handler.send_header("Access-Control-Allow-Origin", "*")
     handler.send_header("Cache-Control", "public, max-age=86400")
+    handler.send_header("Connection", "close")
     handler.send_header("Content-Length", str(len(data)))
     handler.end_headers()
     handler.wfile.write(data)
+    handler.close_connection = True
 
 
 def _extract_openai_text(payload: dict[str, Any]) -> str:
@@ -551,7 +555,14 @@ class StickerHandler(BaseHTTPRequestHandler):
         except ValueError:
             length = 0
         if length <= 0 or length > MAX_ANALYSIS_BODY_BYTES:
-            _json_response(self, 413, {"error": "payload_too_large"})
+            _json_response(
+                self,
+                413,
+                {
+                    "error": "payload_too_large",
+                    "message": f"request body must be 1-{MAX_ANALYSIS_BODY_BYTES} bytes",
+                },
+            )
             return
 
         try:

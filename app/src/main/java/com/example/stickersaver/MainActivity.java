@@ -55,6 +55,8 @@ public class MainActivity extends Activity {
     private static final String DEFAULT_SERVER_BASE_URL = "http://10.0.2.2:8080";
     private static final int STORAGE_PERMISSION_REQUEST = 42;
     private static final int PICK_MEDIA_SEARCH_REQUEST = 43;
+    private static final int ANALYSIS_IMAGE_MAX_SIDE = 640;
+    private static final int ANALYSIS_IMAGE_MAX_BYTES = 900 * 1024;
 
     private final ExecutorService executor = Executors.newFixedThreadPool(4);
     private final List<Sticker> currentStickers = new ArrayList<>();
@@ -565,8 +567,8 @@ public class MainActivity extends Activity {
     private byte[] compressBitmap(Bitmap bitmap) {
         int maxSide = Math.max(bitmap.getWidth(), bitmap.getHeight());
         Bitmap output = bitmap;
-        if (maxSide > 900) {
-            float scale = 900f / maxSide;
+        if (maxSide > ANALYSIS_IMAGE_MAX_SIDE) {
+            float scale = (float) ANALYSIS_IMAGE_MAX_SIDE / maxSide;
             output = Bitmap.createScaledBitmap(
                     bitmap,
                     Math.max(1, Math.round(bitmap.getWidth() * scale)),
@@ -574,31 +576,46 @@ public class MainActivity extends Activity {
                     true
             );
         }
-        ByteArrayOutputStream stream = new ByteArrayOutputStream();
-        output.compress(Bitmap.CompressFormat.JPEG, 82, stream);
-        return stream.toByteArray();
+        byte[] data = new byte[0];
+        int quality = 78;
+        while (quality >= 52) {
+            ByteArrayOutputStream stream = new ByteArrayOutputStream();
+            output.compress(Bitmap.CompressFormat.JPEG, quality, stream);
+            data = stream.toByteArray();
+            if (data.length <= ANALYSIS_IMAGE_MAX_BYTES) {
+                break;
+            }
+            quality -= 8;
+        }
+        return data;
     }
 
     private String postJson(String urlText, String jsonBody) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(urlText).openConnection();
+        byte[] bodyBytes = jsonBody.getBytes(StandardCharsets.UTF_8);
         connection.setConnectTimeout(12000);
-        connection.setReadTimeout(45000);
+        connection.setReadTimeout(60000);
         connection.setRequestMethod("POST");
         connection.setDoOutput(true);
         connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
         connection.setRequestProperty("Accept", "application/json");
+        connection.setRequestProperty("Connection", "close");
         connection.setRequestProperty("User-Agent", "StickerSaver/1.0");
-        try (OutputStream output = connection.getOutputStream()) {
-            output.write(jsonBody.getBytes(StandardCharsets.UTF_8));
+        connection.setFixedLengthStreamingMode(bodyBytes.length);
+        try {
+            try (OutputStream output = connection.getOutputStream()) {
+                output.write(bodyBytes);
+            }
+            int code = connection.getResponseCode();
+            InputStream input = code >= 200 && code < 300 ? connection.getInputStream() : connection.getErrorStream();
+            String response = input == null ? "" : new String(readAll(input), StandardCharsets.UTF_8);
+            if (code < 200 || code >= 300) {
+                throw new IllegalStateException("HTTP " + code + " " + response);
+            }
+            return response;
+        } finally {
+            connection.disconnect();
         }
-        int code = connection.getResponseCode();
-        InputStream input = code >= 200 && code < 300 ? connection.getInputStream() : connection.getErrorStream();
-        String response = input == null ? "" : new String(readAll(input), StandardCharsets.UTF_8);
-        connection.disconnect();
-        if (code < 200 || code >= 300) {
-            throw new IllegalStateException("HTTP " + code + " " + response);
-        }
-        return response;
     }
 
     private String guessSearchKeyword(Uri uri) {
