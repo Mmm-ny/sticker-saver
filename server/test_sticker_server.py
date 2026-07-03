@@ -45,7 +45,7 @@ class StickerServerTests(unittest.TestCase):
     def test_hot_term_query_resolution(self):
         resolved, mode = sticker_server.resolve_search_query("哈哈")
 
-        self.assertEqual(resolved, "lol laughing reaction")
+        self.assertEqual(resolved, "haha")
         self.assertEqual(mode, "hot_term")
 
     def test_rank_prefers_trending_recent_items(self):
@@ -100,12 +100,13 @@ class StickerServerTests(unittest.TestCase):
 
         result = sticker_server.search_giphy("哈哈", 1, limit=24)
 
-        self.assertEqual(result["resolvedQuery"], "lol laughing reaction")
+        self.assertEqual(result["resolvedQuery"], "haha")
         self.assertEqual(result["queryMode"], "hot_term")
         requested_url = urlopen.call_args.args[0]
         parsed = urllib.parse.parse_qs(urllib.parse.urlparse(requested_url).query)
-        self.assertEqual(parsed["q"], ["lol laughing reaction"])
+        self.assertEqual(parsed["q"], ["haha"])
         self.assertEqual(parsed["limit"], ["48"])
+        self.assertNotIn("lang", parsed)
 
 
 if __name__ == "__main__":

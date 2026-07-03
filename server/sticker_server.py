@@ -23,19 +23,19 @@ GIPHY_TRENDING_URL = "https://api.giphy.com/v1/gifs/trending"
 RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_MAX_REQUESTS = 30
 HOT_TERM_QUERIES = {
-    "哈哈": "lol laughing reaction",
-    "笑死": "lol laughing meme",
-    "绷不住": "cant stop laughing reaction",
-    "破防": "crying emotional damage reaction",
-    "无语": "speechless facepalm reaction",
+    "哈哈": "haha",
+    "笑死": "laughing",
+    "绷不住": "laughing",
+    "破防": "crying",
+    "无语": "speechless",
     "谢谢": "thank you cute reaction",
-    "离谱": "confused what reaction meme",
-    "绝绝子": "amazing awesome reaction",
-    "yyds": "goat best ever reaction",
-    "尊嘟假嘟": "really confused reaction",
+    "离谱": "confused",
+    "绝绝子": "amazing",
+    "yyds": "goat",
+    "尊嘟假嘟": "really",
     "吗喽": "monkey reaction meme",
-    "鼠鼠": "cute mouse reaction",
-    "塔菲": "taffy vtuber anime reaction",
+    "鼠鼠": "cute mouse",
+    "塔菲": "taffy",
 }
 _request_log: dict[str, list[float]] = {}
 
@@ -112,10 +112,10 @@ def _rank_giphy_items(items: list[dict[str, Any]], resolved_query: str) -> list[
         trending_time = _parse_giphy_datetime(item.get("trending_datetime", ""))
         recency_time = max(import_time, trending_time)
         age_days = (now - recency_time) / 86400 if recency_time else 3650
-        recency_score = max(0, 220 - min(age_days, 365) * 0.6)
-        trend_score = 180 if trending_time else 0
-        query_score = 120 if _contains_query_hint(item, resolved_query) else 0
-        giphy_order_score = max(0, 1000 - index * 14)
+        recency_score = max(0, 80 - min(age_days, 365) * 0.2)
+        trend_score = 80 if trending_time else 0
+        query_score = 240 if _contains_query_hint(item, resolved_query) else 0
+        giphy_order_score = max(0, 10000 - index * 220)
         score = giphy_order_score + recency_score + trend_score + query_score
         scored.append((score, item))
     scored.sort(key=lambda pair: pair[0], reverse=True)
@@ -154,7 +154,6 @@ def search_giphy(query: str, page: int, limit: int = 24) -> dict[str, Any]:
         "limit": str(fetch_limit),
         "offset": str((page - 1) * fetch_limit),
         "rating": "pg-13",
-        "lang": "zh-CN",
     }
     url = GIPHY_TRENDING_URL
     if resolved_query:
