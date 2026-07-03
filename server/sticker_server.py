@@ -26,6 +26,7 @@ GIPHY_TRENDING_URL = "https://api.giphy.com/v1/gifs/trending"
 RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_MAX_REQUESTS = 30
 MAX_ANALYSIS_BODY_BYTES = 6 * 1024 * 1024
+MAX_PROXY_IMAGE_BYTES = 12 * 1024 * 1024
 HOT_TERM_QUERIES = {
     "哈哈": "haha",
     "笑死": "laughing",
@@ -122,13 +123,18 @@ def _extract_urls(value: Any) -> list[str]:
     return []
 
 
+def _proxy_path(url: str) -> str:
+    return "/api/stickers/proxy?url=" + urllib.parse.quote(url, safe="")
+
+
 def normalize_url_item(url: str, source: str, title: str, index: int) -> dict[str, Any]:
     item_id = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
+    delivery_url = _proxy_path(url)
     return {
         "id": f"{source.lower()}-{item_id}",
         "title": title or f"{source} sticker {index + 1}",
-        "thumbnailUrl": url,
-        "originalUrl": url,
+        "thumbnailUrl": delivery_url,
+        "originalUrl": delivery_url,
         "source": source,
         "width": 0,
         "height": 0,
@@ -136,7 +142,16 @@ def normalize_url_item(url: str, source: str, title: str, index: int) -> dict[st
         "pageUrl": url,
         "importDatetime": "",
         "trendingDatetime": "",
+        "upstreamUrl": url,
     }
+
+
+def _clean_domestic_query(query: str) -> str:
+    cleaned = query.strip()
+    for word in ("表情包", "斗图", "动图", "gif", "GIF"):
+        cleaned = cleaned.replace(word, " ")
+    cleaned = " ".join(cleaned.split())
+    return cleaned or query.strip()
 
 
 def resolve_search_query(query: str) -> tuple[str, str]:
@@ -243,7 +258,8 @@ def search_alapi(query: str, page: int, limit: int = 24) -> dict[str, Any]:
         raise RuntimeError("ALAPI_TOKEN is not configured")
 
     page = max(page, 1)
-    params = urllib.parse.urlencode({"token": token, "keyword": query.strip(), "page": str(page)})
+    search_query = _clean_domestic_query(query)
+    params = urllib.parse.urlencode({"token": token, "keyword": search_query, "page": str(page)})
     request = urllib.request.Request(
         f"{ALAPI_DOUTU_URL}?{params}",
         headers={"Accept": "application/json"},
@@ -278,6 +294,42 @@ def search_stickers(query: str, page: int) -> dict[str, Any]:
         except (RuntimeError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             print(f"ALAPI search failed, falling back to GIPHY: {exc}")
     return search_giphy(query, page)
+
+
+def proxy_image(url: str) -> tuple[bytes, str]:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("invalid image url")
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 StickerSaver/1.0",
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Referer": f"{parsed.scheme}://{parsed.netloc}/",
+        },
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=20) as response:
+        content_type = response.headers.get("Content-Type", "application/octet-stream").split(";", 1)[0].strip()
+        data = response.read(MAX_PROXY_IMAGE_BYTES + 1)
+    if len(data) > MAX_PROXY_IMAGE_BYTES:
+        raise ValueError("image too large")
+    if not content_type.startswith("image/"):
+        guessed = _guess_mime_type(url)
+        if guessed == "image/gif":
+            raise ValueError("upstream did not return an image")
+        content_type = guessed
+    return data, content_type
+
+
+def _binary_response(handler: BaseHTTPRequestHandler, status: int, data: bytes, content_type: str) -> None:
+    handler.send_response(status)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.send_header("Cache-Control", "public, max-age=86400")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
 
 
 def _extract_openai_text(payload: dict[str, Any]) -> str:
@@ -403,6 +455,19 @@ class StickerHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/health":
             _json_response(self, 200, {"ok": True})
+            return
+        if parsed.path == "/api/stickers/proxy":
+            params = urllib.parse.parse_qs(parsed.query)
+            url = (params.get("url", [""])[0] or "").strip()
+            try:
+                data, content_type = proxy_image(url)
+            except ValueError as exc:
+                _json_response(self, 400, {"error": "bad_request", "message": str(exc)})
+                return
+            except (urllib.error.URLError, TimeoutError) as exc:
+                _json_response(self, 502, {"error": "upstream_failed", "message": str(exc)})
+                return
+            _binary_response(self, 200, data, content_type)
             return
         if parsed.path != "/api/stickers/search":
             _json_response(self, 404, {"error": "not_found"})

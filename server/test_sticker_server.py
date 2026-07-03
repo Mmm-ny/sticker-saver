@@ -64,9 +64,13 @@ class StickerServerTests(unittest.TestCase):
         result = sticker_server.normalize_url_item("https://example.com/a.webp", "ALAPI", "哈哈 表情包", 0)
 
         self.assertEqual(result["title"], "哈哈 表情包")
-        self.assertEqual(result["thumbnailUrl"], "https://example.com/a.webp")
+        self.assertTrue(result["thumbnailUrl"].startswith("/api/stickers/proxy?url="))
+        self.assertEqual(result["upstreamUrl"], "https://example.com/a.webp")
         self.assertEqual(result["source"], "ALAPI")
         self.assertEqual(result["mimeType"], "image/webp")
+
+    def test_clean_domestic_query_removes_generic_words(self):
+        self.assertEqual(sticker_server._clean_domestic_query("塔菲 表情包 gif"), "塔菲")
 
     def test_parse_keywords_text_json(self):
         parsed = sticker_server._parse_keywords_text(
@@ -165,7 +169,8 @@ class StickerServerTests(unittest.TestCase):
 
         self.assertEqual(result["source"], "ALAPI")
         self.assertEqual(result["queryMode"], "domestic")
-        self.assertEqual(result["items"][0]["originalUrl"], "https://example.com/one.gif")
+        self.assertTrue(result["items"][0]["originalUrl"].startswith("/api/stickers/proxy?url="))
+        self.assertEqual(result["items"][0]["upstreamUrl"], "https://example.com/one.gif")
         request = urlopen.call_args.args[0]
         parsed_url = urllib.parse.urlparse(request.full_url)
         self.assertEqual(f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}", sticker_server.ALAPI_DOUTU_URL)
@@ -173,6 +178,19 @@ class StickerServerTests(unittest.TestCase):
         self.assertEqual(params["token"], ["test-token"])
         self.assertEqual(params["keyword"], ["哈哈"])
         self.assertEqual(params["page"], ["2"])
+
+    @mock.patch("urllib.request.urlopen")
+    def test_proxy_image_returns_image_bytes(self, urlopen):
+        response = urlopen.return_value.__enter__.return_value
+        response.headers.get.return_value = "image/png"
+        response.read.return_value = b"png-data"
+
+        data, content_type = sticker_server.proxy_image("http://i0.hdslb.com/test.png")
+
+        self.assertEqual(data, b"png-data")
+        self.assertEqual(content_type, "image/png")
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "http://i0.hdslb.com/test.png")
 
     @mock.patch("sticker_server.search_giphy")
     @mock.patch("sticker_server.search_alapi")

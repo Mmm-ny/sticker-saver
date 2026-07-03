@@ -241,19 +241,31 @@ public class MainActivity extends Activity {
         }
         for (int i = 0; i < items.length(); i++) {
             JSONObject item = items.getJSONObject(i);
-            String originalUrl = item.optString("originalUrl", "");
-            String thumbnailUrl = item.optString("thumbnailUrl", originalUrl);
+            String originalUrl = resolveResultUrl(item.optString("originalUrl", ""));
+            String thumbnailUrl = resolveResultUrl(item.optString("thumbnailUrl", originalUrl));
+            String pageUrl = item.optString("upstreamUrl", item.optString("pageUrl", originalUrl));
             if (!TextUtils.isEmpty(originalUrl)) {
                 stickers.add(new Sticker(
                         item.optString("title", "Untitled sticker"),
                         thumbnailUrl,
                         originalUrl,
+                        pageUrl,
                         item.optString("source", "GIPHY"),
                         item.optString("mimeType", "image/gif")
                 ));
             }
         }
         return stickers;
+    }
+
+    private String resolveResultUrl(String url) {
+        if (TextUtils.isEmpty(url)) {
+            return "";
+        }
+        if (url.startsWith("/")) {
+            return getSavedServerBaseUrl() + url;
+        }
+        return url;
     }
 
     private void renderResults(List<Sticker> stickers) {
@@ -304,7 +316,7 @@ public class MainActivity extends Activity {
 
         Button openButton = new Button(this);
         openButton.setText("打开");
-        openButton.setOnClickListener(v -> startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(sticker.originalUrl))));
+        openButton.setOnClickListener(v -> startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(sticker.pageUrl))));
         actions.addView(openButton, new LinearLayout.LayoutParams(dp(86), dp(44)));
 
         executor.execute(() -> {
@@ -730,13 +742,15 @@ public class MainActivity extends Activity {
         final String title;
         final String thumbnailUrl;
         final String originalUrl;
+        final String pageUrl;
         final String source;
         final String mimeType;
 
-        Sticker(String title, String thumbnailUrl, String originalUrl, String source, String mimeType) {
+        Sticker(String title, String thumbnailUrl, String originalUrl, String pageUrl, String source, String mimeType) {
             this.title = title;
             this.thumbnailUrl = thumbnailUrl;
             this.originalUrl = originalUrl;
+            this.pageUrl = pageUrl;
             this.source = source;
             this.mimeType = mimeType;
         }
