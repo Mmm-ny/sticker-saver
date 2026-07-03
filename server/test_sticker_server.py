@@ -48,6 +48,26 @@ class StickerServerTests(unittest.TestCase):
         self.assertEqual(resolved, "haha")
         self.assertEqual(mode, "hot_term")
 
+    def test_extract_urls_from_alapi_shapes(self):
+        payload = {
+            "data": [
+                {"url": "https://example.com/one.gif"},
+                {"img": "https://example.com/two.webp"},
+            ]
+        }
+
+        urls = sticker_server._extract_urls(payload)
+
+        self.assertEqual(urls, ["https://example.com/one.gif", "https://example.com/two.webp"])
+
+    def test_normalize_url_item(self):
+        result = sticker_server.normalize_url_item("https://example.com/a.webp", "ALAPI", "哈哈 表情包", 0)
+
+        self.assertEqual(result["title"], "哈哈 表情包")
+        self.assertEqual(result["thumbnailUrl"], "https://example.com/a.webp")
+        self.assertEqual(result["source"], "ALAPI")
+        self.assertEqual(result["mimeType"], "image/webp")
+
     def test_rank_prefers_trending_recent_items(self):
         old = {
             "id": "old",
@@ -107,6 +127,39 @@ class StickerServerTests(unittest.TestCase):
         self.assertEqual(parsed["q"], ["haha"])
         self.assertEqual(parsed["limit"], ["48"])
         self.assertNotIn("lang", parsed)
+
+    @mock.patch.dict(os.environ, {"ALAPI_TOKEN": "test-token"}, clear=False)
+    @mock.patch("urllib.request.urlopen")
+    def test_search_alapi_maps_response(self, urlopen):
+        payload = {
+            "code": 200,
+            "message": "success",
+            "data": {"data": ["https://example.com/one.gif", "https://example.com/two.jpg"]},
+        }
+        urlopen.return_value.__enter__.return_value.read.return_value = json.dumps(payload).encode("utf-8")
+
+        result = sticker_server.search_alapi("哈哈", 2, limit=1)
+
+        self.assertEqual(result["source"], "ALAPI")
+        self.assertEqual(result["queryMode"], "domestic")
+        self.assertEqual(result["items"][0]["originalUrl"], "https://example.com/one.gif")
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, sticker_server.ALAPI_DOUTU_URL)
+        self.assertEqual(request.headers["Token"], "test-token")
+        body = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(body["keyword"], "哈哈")
+        self.assertEqual(body["page"], "2")
+
+    @mock.patch("sticker_server.search_giphy")
+    @mock.patch("sticker_server.search_alapi")
+    @mock.patch.dict(os.environ, {"ALAPI_TOKEN": "test-token"}, clear=False)
+    def test_search_stickers_falls_back_when_alapi_empty(self, search_alapi, search_giphy):
+        search_alapi.return_value = {"items": []}
+        search_giphy.return_value = {"items": [{"id": "giphy"}], "source": "GIPHY"}
+
+        result = sticker_server.search_stickers("哈哈", 1)
+
+        self.assertEqual(result["source"], "GIPHY")
 
 
 if __name__ == "__main__":

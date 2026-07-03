@@ -7,6 +7,7 @@
 - 远程连接：Windows PowerShell 自带 `ssh`
 - 开放端口：`8080`
 - 必备密钥：`GIPHY_API_KEY`
+- 可选国内源密钥：`ALAPI_TOKEN`
 
 ## 1. 购买服务器
 
@@ -50,18 +51,21 @@ git clone https://github.com/Mmm-ny/sticker-saver.git
 cd sticker-saver
 ```
 
-## 5. 配置 GIPHY API Key
+## 5. 配置 API Key
 
 ```bash
 cp server/.env.example .env
 nano .env
 ```
 
-把内容改成：
+最少需要配置 GIPHY，国内表情源可以后面再加：
 
 ```text
 GIPHY_API_KEY=你的真实GIPHY_API_KEY
+ALAPI_TOKEN=
 ```
+
+如果已经在 ALAPI 申请了“斗图表情包”接口，把 `ALAPI_TOKEN` 改成你的真实 token。服务端会优先搜索 ALAPI，没配置、无结果或接口失败时自动回退到 GIPHY。
 
 ## 6. 启动服务
 

@@ -9,6 +9,7 @@ Set GIPHY_API_KEY before running:
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import time
 import urllib.error
@@ -18,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 
+ALAPI_DOUTU_URL = "https://v3.alapi.cn/api/doutu"
 GIPHY_SEARCH_URL = "https://api.giphy.com/v1/gifs/search"
 GIPHY_TRENDING_URL = "https://api.giphy.com/v1/gifs/trending"
 RATE_LIMIT_WINDOW_SECONDS = 60
@@ -76,6 +78,63 @@ def _pick_image(images: dict[str, Any], *names: str) -> dict[str, Any]:
         if value and value.get("url"):
             return value
     return {}
+
+
+def _guess_mime_type(url: str) -> str:
+    path = urllib.parse.urlparse(url).path.lower()
+    if path.endswith(".webp"):
+        return "image/webp"
+    if path.endswith((".jpg", ".jpeg")):
+        return "image/jpeg"
+    if path.endswith(".png"):
+        return "image/png"
+    return "image/gif"
+
+
+def _extract_urls(value: Any) -> list[str]:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return []
+        if stripped.startswith(("[", "{")):
+            try:
+                return _extract_urls(json.loads(stripped))
+            except json.JSONDecodeError:
+                pass
+        candidates = stripped.replace("\r", "\n").replace(",", "\n").splitlines()
+        return [candidate.strip() for candidate in candidates if candidate.strip().startswith(("http://", "https://"))]
+    if isinstance(value, list):
+        urls: list[str] = []
+        for item in value:
+            urls.extend(_extract_urls(item))
+        return urls
+    if isinstance(value, dict):
+        for key in ("url", "src", "image", "img", "gif", "path"):
+            url = value.get(key)
+            if isinstance(url, str) and url.startswith(("http://", "https://")):
+                return [url]
+        urls: list[str] = []
+        for nested in value.values():
+            urls.extend(_extract_urls(nested))
+        return urls
+    return []
+
+
+def normalize_url_item(url: str, source: str, title: str, index: int) -> dict[str, Any]:
+    item_id = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
+    return {
+        "id": f"{source.lower()}-{item_id}",
+        "title": title or f"{source} sticker {index + 1}",
+        "thumbnailUrl": url,
+        "originalUrl": url,
+        "source": source,
+        "width": 0,
+        "height": 0,
+        "mimeType": _guess_mime_type(url),
+        "pageUrl": url,
+        "importDatetime": "",
+        "trendingDatetime": "",
+    }
 
 
 def resolve_search_query(query: str) -> tuple[str, str]:
@@ -176,6 +235,54 @@ def search_giphy(query: str, page: int, limit: int = 24) -> dict[str, Any]:
     }
 
 
+def search_alapi(query: str, page: int, limit: int = 24) -> dict[str, Any]:
+    token = os.environ.get("ALAPI_TOKEN")
+    if not token:
+        raise RuntimeError("ALAPI_TOKEN is not configured")
+
+    page = max(page, 1)
+    body = json.dumps({"keyword": query.strip(), "page": str(page)}, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        ALAPI_DOUTU_URL,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "token": token,
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=12) as response:
+        raw = response.read()
+    payload = json.loads(raw.decode("utf-8"))
+    code = payload.get("code")
+    if code not in (0, 200, "0", "200", None):
+        raise RuntimeError(payload.get("message") or f"ALAPI returned code {code}")
+
+    urls = _extract_urls(payload.get("data", {}))[:limit]
+    title = f"{query.strip() or '热门'} 表情包"
+    return {
+        "items": [normalize_url_item(url, "ALAPI", title, index) for index, url in enumerate(urls)],
+        "page": page,
+        "source": "ALAPI",
+        "query": query,
+        "resolvedQuery": query.strip(),
+        "queryMode": "domestic",
+        "sortMode": "alapi_default",
+    }
+
+
+def search_stickers(query: str, page: int) -> dict[str, Any]:
+    if os.environ.get("ALAPI_TOKEN"):
+        try:
+            result = search_alapi(query, page)
+            if result["items"]:
+                return result
+        except (RuntimeError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            print(f"ALAPI search failed, falling back to GIPHY: {exc}")
+    return search_giphy(query, page)
+
+
 class StickerHandler(BaseHTTPRequestHandler):
     server_version = "StickerSaver/1.0"
 
@@ -204,7 +311,7 @@ class StickerHandler(BaseHTTPRequestHandler):
             page = 1
 
         try:
-            result = search_giphy(query, page)
+            result = search_stickers(query, page)
         except RuntimeError as exc:
             _json_response(self, 500, {"error": "not_configured", "message": str(exc)})
             return
