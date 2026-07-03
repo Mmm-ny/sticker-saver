@@ -20,10 +20,12 @@ from typing import Any
 
 
 ALAPI_DOUTU_URL = "https://v3.alapi.cn/api/doutu"
+OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 GIPHY_SEARCH_URL = "https://api.giphy.com/v1/gifs/search"
 GIPHY_TRENDING_URL = "https://api.giphy.com/v1/gifs/trending"
 RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_MAX_REQUESTS = 30
+MAX_ANALYSIS_BODY_BYTES = 6 * 1024 * 1024
 HOT_TERM_QUERIES = {
     "哈哈": "haha",
     "笑死": "laughing",
@@ -278,6 +280,88 @@ def search_stickers(query: str, page: int) -> dict[str, Any]:
     return search_giphy(query, page)
 
 
+def _extract_openai_text(payload: dict[str, Any]) -> str:
+    if isinstance(payload.get("output_text"), str):
+        return payload["output_text"]
+    parts: list[str] = []
+    for item in payload.get("output", []):
+        for content in item.get("content", []):
+            text = content.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+    return "\n".join(parts).strip()
+
+
+def _parse_keywords_text(text: str) -> tuple[str, list[str]]:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.strip("`")
+        if stripped.lower().startswith("json"):
+            stripped = stripped[4:].strip()
+    try:
+        payload = json.loads(stripped)
+        keywords = payload.get("keywords") or []
+        if isinstance(keywords, str):
+            keywords = [keywords]
+        cleaned = [str(keyword).strip() for keyword in keywords if str(keyword).strip()]
+        query = str(payload.get("query") or " ".join(cleaned[:3])).strip()
+        return query, cleaned
+    except json.JSONDecodeError:
+        cleaned = [part.strip() for part in stripped.replace("，", ",").replace("\n", ",").split(",") if part.strip()]
+        return " ".join(cleaned[:3]), cleaned
+
+
+def analyze_media(data_base64: str, mime_type: str, file_name: str = "") -> dict[str, Any]:
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not configured")
+    if not data_base64:
+        raise ValueError("dataBase64 is required")
+
+    safe_mime = mime_type if mime_type and mime_type.startswith("image/") else "image/jpeg"
+    model = os.environ.get("OPENAI_VISION_MODEL", "gpt-4.1-mini")
+    prompt = (
+        "你是中文表情包搜索助手。观察这张图片或视频截图，提取适合在中文表情包网站搜索的关键词。"
+        "优先关注人物、表情、情绪、动作、梗、字幕含义。"
+        "返回严格 JSON：{\"query\":\"2到6个中文搜索词\",\"keywords\":[\"词1\",\"词2\",\"词3\"]}。"
+        "不要解释，不要 Markdown。"
+    )
+    if file_name:
+        prompt += f" 文件名：{file_name}"
+    body = {
+        "model": model,
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt},
+                    {"type": "input_image", "image_url": f"data:{safe_mime};base64,{data_base64}"},
+                ],
+            }
+        ],
+        "max_output_tokens": 180,
+    }
+    request = urllib.request.Request(
+        OPENAI_RESPONSES_URL,
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        raw = response.read()
+    payload = json.loads(raw.decode("utf-8"))
+    query, keywords = _parse_keywords_text(_extract_openai_text(payload))
+    return {
+        "query": query or "热门 表情包",
+        "keywords": keywords,
+        "model": model,
+    }
+
+
 class StickerHandler(BaseHTTPRequestHandler):
     server_version = "StickerSaver/1.0"
 
@@ -315,6 +399,47 @@ class StickerHandler(BaseHTTPRequestHandler):
             return
         except json.JSONDecodeError:
             _json_response(self, 502, {"error": "bad_upstream_response"})
+            return
+
+        _json_response(self, 200, result)
+
+    def do_POST(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path != "/api/stickers/analyze-media":
+            _json_response(self, 404, {"error": "not_found"})
+            return
+
+        client = _client_id(self)
+        if _rate_limited(client):
+            _json_response(self, 429, {"error": "rate_limited", "message": "Too many requests"})
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0 or length > MAX_ANALYSIS_BODY_BYTES:
+            _json_response(self, 413, {"error": "payload_too_large"})
+            return
+
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            result = analyze_media(
+                payload.get("dataBase64", ""),
+                payload.get("mimeType", "image/jpeg"),
+                payload.get("fileName", ""),
+            )
+        except RuntimeError as exc:
+            _json_response(self, 500, {"error": "not_configured", "message": str(exc)})
+            return
+        except ValueError as exc:
+            _json_response(self, 400, {"error": "bad_request", "message": str(exc)})
+            return
+        except (urllib.error.URLError, TimeoutError) as exc:
+            _json_response(self, 502, {"error": "upstream_failed", "message": str(exc)})
+            return
+        except json.JSONDecodeError:
+            _json_response(self, 400, {"error": "bad_json"})
             return
 
         _json_response(self, 200, result)

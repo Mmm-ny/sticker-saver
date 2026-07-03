@@ -68,6 +68,25 @@ class StickerServerTests(unittest.TestCase):
         self.assertEqual(result["source"], "ALAPI")
         self.assertEqual(result["mimeType"], "image/webp")
 
+    def test_parse_keywords_text_json(self):
+        query, keywords = sticker_server._parse_keywords_text('{"query":"大笑 哈哈","keywords":["大笑","哈哈"]}')
+
+        self.assertEqual(query, "大笑 哈哈")
+        self.assertEqual(keywords, ["大笑", "哈哈"])
+
+    def test_extract_openai_text_from_output(self):
+        payload = {
+            "output": [
+                {
+                    "content": [
+                        {"type": "output_text", "text": '{"query":"震惊 表情包","keywords":["震惊"]}'}
+                    ]
+                }
+            ]
+        }
+
+        self.assertIn("震惊", sticker_server._extract_openai_text(payload))
+
     def test_rank_prefers_trending_recent_items(self):
         old = {
             "id": "old",
@@ -161,6 +180,31 @@ class StickerServerTests(unittest.TestCase):
         result = sticker_server.search_stickers("哈哈", 1)
 
         self.assertEqual(result["source"], "GIPHY")
+
+    @mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key", "OPENAI_VISION_MODEL": "test-model"}, clear=False)
+    @mock.patch("urllib.request.urlopen")
+    def test_analyze_media_calls_openai(self, urlopen):
+        payload = {
+            "output": [
+                {
+                    "content": [
+                        {"text": '{"query":"开心 大笑","keywords":["开心","大笑"]}'}
+                    ]
+                }
+            ]
+        }
+        urlopen.return_value.__enter__.return_value.read.return_value = json.dumps(payload).encode("utf-8")
+
+        result = sticker_server.analyze_media("abc123", "image/jpeg", "test.jpg")
+
+        self.assertEqual(result["query"], "开心 大笑")
+        self.assertEqual(result["keywords"], ["开心", "大笑"])
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, sticker_server.OPENAI_RESPONSES_URL)
+        self.assertEqual(request.headers["Authorization"], "Bearer test-key")
+        body = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(body["model"], "test-model")
+        self.assertIn("data:image/jpeg;base64,abc123", body["input"][0]["content"][1]["image_url"])
 
 
 if __name__ == "__main__":

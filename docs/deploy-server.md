@@ -8,6 +8,7 @@
 - 开放端口：`8080`
 - 必备密钥：`GIPHY_API_KEY`
 - 可选国内源密钥：`ALAPI_TOKEN`
+- 可选视觉识别密钥：`OPENAI_API_KEY`
 
 ## 1. 购买服务器
 
@@ -63,9 +64,13 @@ nano .env
 ```text
 GIPHY_API_KEY=你的真实GIPHY_API_KEY
 ALAPI_TOKEN=
+OPENAI_API_KEY=
+OPENAI_VISION_MODEL=gpt-4.1-mini
 ```
 
 如果已经在 ALAPI 申请了“斗图表情包”接口，把 `ALAPI_TOKEN` 改成你的真实 token。服务端会优先搜索 ALAPI，没配置、无结果或接口失败时自动回退到 GIPHY。
+
+如果要启用“根据本地图片/视频画面搜索”，还需要配置 `OPENAI_API_KEY`。手机端会上传图片或视频首帧到服务端，服务端生成中文搜索词后再搜索表情包；密钥只保存在服务器 `.env`，不要提交到 GitHub。
 
 ## 6. 启动服务
 

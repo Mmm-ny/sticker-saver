@@ -14,6 +14,7 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Movie;
+import android.media.MediaMetadataRetriever;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -21,6 +22,7 @@ import android.os.Environment;
 import android.provider.OpenableColumns;
 import android.provider.MediaStore;
 import android.text.TextUtils;
+import android.util.Base64;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
@@ -40,6 +42,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -438,18 +441,114 @@ public class MainActivity extends Activity {
     }
 
     private void promptSearchFromLocalMedia(Uri uri) {
-        String suggested = guessSearchKeyword(uri);
+        setLoading(true, "正在识别本地媒体...");
+        executor.execute(() -> {
+            String fallback = guessSearchKeyword(uri);
+            try {
+                AnalysisImage image = buildAnalysisImage(uri);
+                String body = new JSONObject()
+                        .put("fileName", getDisplayName(uri))
+                        .put("mimeType", image.mimeType)
+                        .put("dataBase64", Base64.encodeToString(image.bytes, Base64.NO_WRAP))
+                        .toString();
+                String response = postJson(getSavedServerBaseUrl() + "/api/stickers/analyze-media", body);
+                JSONObject root = new JSONObject(response);
+                String query = root.optString("query", fallback);
+                runOnUiThread(() -> {
+                    setLoading(false, "已根据画面生成搜索词");
+                    showSearchKeywordDialog(query, "已根据图片/视频画面生成关键词，可修改后搜索。");
+                });
+            } catch (Exception exception) {
+                runOnUiThread(() -> {
+                    setLoading(false, "画面识别不可用，已使用文件名生成搜索词");
+                    showSearchKeywordDialog(fallback, "视觉识别暂不可用，已根据文件名生成关键词，可修改后搜索。");
+                });
+            }
+        });
+    }
+
+    private void showSearchKeywordDialog(String suggested, String message) {
         EditText input = new EditText(this);
         input.setSingleLine(true);
         input.setText(suggested);
         input.setSelectAllOnFocus(true);
         new AlertDialog.Builder(this)
                 .setTitle("根据本地媒体搜索")
-                .setMessage("当前版本会根据文件名生成关键词。请确认或修改后搜索相似表情。")
+                .setMessage(message)
                 .setView(input)
                 .setPositiveButton("搜索", (dialog, which) -> search(input.getText().toString(), false))
                 .setNegativeButton("取消", null)
                 .show();
+    }
+
+    private AnalysisImage buildAnalysisImage(Uri uri) throws Exception {
+        String mimeType = getContentResolver().getType(uri);
+        if (mimeType != null && mimeType.startsWith("video/")) {
+            MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+            try {
+                retriever.setDataSource(this, uri);
+                Bitmap frame = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+                if (frame == null) {
+                    throw new IllegalStateException("无法读取视频画面");
+                }
+                return new AnalysisImage(compressBitmap(frame), "image/jpeg");
+            } finally {
+                retriever.release();
+            }
+        }
+
+        try (InputStream input = getContentResolver().openInputStream(uri)) {
+            Bitmap bitmap = BitmapFactory.decodeStream(input);
+            if (bitmap != null) {
+                return new AnalysisImage(compressBitmap(bitmap), "image/jpeg");
+            }
+        }
+
+        try (InputStream input = getContentResolver().openInputStream(uri)) {
+            if (input == null) {
+                throw new IllegalStateException("无法读取本地媒体");
+            }
+            return new AnalysisImage(readAll(input), mimeType == null ? "image/jpeg" : mimeType);
+        }
+    }
+
+    private byte[] compressBitmap(Bitmap bitmap) {
+        int maxSide = Math.max(bitmap.getWidth(), bitmap.getHeight());
+        Bitmap output = bitmap;
+        if (maxSide > 900) {
+            float scale = 900f / maxSide;
+            output = Bitmap.createScaledBitmap(
+                    bitmap,
+                    Math.max(1, Math.round(bitmap.getWidth() * scale)),
+                    Math.max(1, Math.round(bitmap.getHeight() * scale)),
+                    true
+            );
+        }
+        ByteArrayOutputStream stream = new ByteArrayOutputStream();
+        output.compress(Bitmap.CompressFormat.JPEG, 82, stream);
+        return stream.toByteArray();
+    }
+
+    private String postJson(String urlText, String jsonBody) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) new URL(urlText).openConnection();
+        connection.setConnectTimeout(12000);
+        connection.setReadTimeout(45000);
+        connection.setRequestMethod("POST");
+        connection.setDoOutput(true);
+        connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+        connection.setRequestProperty("Accept", "application/json");
+        connection.setRequestProperty("User-Agent", "StickerSaver/1.0");
+        try (OutputStream output = connection.getOutputStream()) {
+            output.write(jsonBody.getBytes(StandardCharsets.UTF_8));
+        }
+        int code = connection.getResponseCode();
+        InputStream input = code >= 200 && code < 300 ? connection.getInputStream() : connection.getErrorStream();
+        String response = input == null ? "" : new String(readAll(input), StandardCharsets.UTF_8);
+        connection.disconnect();
+        if (code < 200 || code >= 300) {
+            throw new IllegalStateException("HTTP " + code + " " + response);
+        }
+        return response;
     }
 
     private String guessSearchKeyword(Uri uri) {
@@ -601,6 +700,16 @@ public class MainActivity extends Activity {
             this.thumbnailUrl = thumbnailUrl;
             this.originalUrl = originalUrl;
             this.source = source;
+            this.mimeType = mimeType;
+        }
+    }
+
+    private static class AnalysisImage {
+        final byte[] bytes;
+        final String mimeType;
+
+        AnalysisImage(byte[] bytes, String mimeType) {
+            this.bytes = bytes;
             this.mimeType = mimeType;
         }
     }
