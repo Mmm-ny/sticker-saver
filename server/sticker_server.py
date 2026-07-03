@@ -241,16 +241,11 @@ def search_alapi(query: str, page: int, limit: int = 24) -> dict[str, Any]:
         raise RuntimeError("ALAPI_TOKEN is not configured")
 
     page = max(page, 1)
-    body = json.dumps({"keyword": query.strip(), "page": str(page)}, ensure_ascii=False).encode("utf-8")
+    params = urllib.parse.urlencode({"token": token, "keyword": query.strip(), "page": str(page)})
     request = urllib.request.Request(
-        ALAPI_DOUTU_URL,
-        data=body,
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "token": token,
-        },
-        method="POST",
+        f"{ALAPI_DOUTU_URL}?{params}",
+        headers={"Accept": "application/json"},
+        method="GET",
     )
     with urllib.request.urlopen(request, timeout=12) as response:
         raw = response.read()

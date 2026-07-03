@@ -144,11 +144,12 @@ class StickerServerTests(unittest.TestCase):
         self.assertEqual(result["queryMode"], "domestic")
         self.assertEqual(result["items"][0]["originalUrl"], "https://example.com/one.gif")
         request = urlopen.call_args.args[0]
-        self.assertEqual(request.full_url, sticker_server.ALAPI_DOUTU_URL)
-        self.assertEqual(request.headers["Token"], "test-token")
-        body = json.loads(request.data.decode("utf-8"))
-        self.assertEqual(body["keyword"], "哈哈")
-        self.assertEqual(body["page"], "2")
+        parsed_url = urllib.parse.urlparse(request.full_url)
+        self.assertEqual(f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}", sticker_server.ALAPI_DOUTU_URL)
+        params = urllib.parse.parse_qs(parsed_url.query)
+        self.assertEqual(params["token"], ["test-token"])
+        self.assertEqual(params["keyword"], ["哈哈"])
+        self.assertEqual(params["page"], ["2"])
 
     @mock.patch("sticker_server.search_giphy")
     @mock.patch("sticker_server.search_alapi")
