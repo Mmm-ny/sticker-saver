@@ -28,6 +28,7 @@ GIPHY_SEARCH_URL = "https://api.giphy.com/v1/gifs/search"
 GIPHY_TRENDING_URL = "https://api.giphy.com/v1/gifs/trending"
 RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_MAX_REQUESTS = 30
+SEARCH_PAGE_LIMIT = 24
 MAX_ANALYSIS_BODY_BYTES = 6 * 1024 * 1024
 MAX_PROXY_IMAGE_BYTES = 12 * 1024 * 1024
 HOT_TERM_QUERIES = {
@@ -156,6 +157,28 @@ def normalize_url_item(url: str, source: str, title: str, index: int) -> dict[st
     }
 
 
+def _item_identity(item: dict[str, Any]) -> str:
+    for key in ("upstreamUrl", "originalUrl", "thumbnailUrl", "pageUrl", "id"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    return json.dumps(item, sort_keys=True, ensure_ascii=False)
+
+
+def _dedupe_items(items: list[dict[str, Any]], limit: int = SEARCH_PAGE_LIMIT) -> list[dict[str, Any]]:
+    seen = set()
+    deduped = []
+    for item in items:
+        identity = _item_identity(item)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        deduped.append(item)
+        if len(deduped) >= limit:
+            break
+    return deduped
+
+
 def _clean_domestic_query(query: str) -> str:
     cleaned = query.strip()
     for word in ("表情包", "斗图", "动图", "gif", "GIF"):
@@ -227,7 +250,7 @@ def normalize_giphy_item(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def search_giphy(query: str, page: int, limit: int = 24) -> dict[str, Any]:
+def search_giphy(query: str, page: int, limit: int = SEARCH_PAGE_LIMIT) -> dict[str, Any]:
     api_key = os.environ.get("GIPHY_API_KEY")
     if not api_key:
         raise RuntimeError("GIPHY_API_KEY is not configured")
@@ -255,14 +278,16 @@ def search_giphy(query: str, page: int, limit: int = 24) -> dict[str, Any]:
         "items": [normalize_giphy_item(item) for item in ranked_items],
         "page": page,
         "source": "GIPHY",
+        "sources": ["GIPHY"],
         "query": query,
         "resolvedQuery": resolved_query,
         "queryMode": queryMode,
         "sortMode": "giphy_popularity_recency_proxy",
+        "hasMore": len(ranked_items) >= limit,
     }
 
 
-def search_alapi(query: str, page: int, limit: int = 24) -> dict[str, Any]:
+def search_alapi(query: str, page: int, limit: int = SEARCH_PAGE_LIMIT) -> dict[str, Any]:
     token = os.environ.get("ALAPI_TOKEN")
     if not token:
         raise RuntimeError("ALAPI_TOKEN is not configured")
@@ -288,22 +313,51 @@ def search_alapi(query: str, page: int, limit: int = 24) -> dict[str, Any]:
         "items": [normalize_url_item(url, "ALAPI", title, index) for index, url in enumerate(urls)],
         "page": page,
         "source": "ALAPI",
+        "sources": ["ALAPI"],
         "query": query,
         "resolvedQuery": query.strip(),
         "queryMode": "domestic",
         "sortMode": "alapi_default",
+        "hasMore": len(urls) >= limit,
     }
 
 
 def search_stickers(query: str, page: int) -> dict[str, Any]:
+    alapi_result = None
+    alapi_error = None
     if os.environ.get("ALAPI_TOKEN"):
         try:
-            result = search_alapi(query, page)
-            if result["items"]:
-                return result
+            alapi_result = search_alapi(query, page)
+            if len(alapi_result["items"]) >= SEARCH_PAGE_LIMIT:
+                return alapi_result
         except (RuntimeError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            alapi_error = str(exc)
             print(f"ALAPI search failed, falling back to GIPHY: {exc}")
-    return search_giphy(query, page)
+
+    try:
+        giphy_result = search_giphy(query, page)
+    except RuntimeError:
+        if alapi_result and alapi_result["items"]:
+            return alapi_result
+        raise
+
+    if not alapi_result or not alapi_result["items"]:
+        if alapi_error:
+            giphy_result["fallbackReason"] = f"ALAPI: {alapi_error}"
+        return giphy_result
+
+    items = _dedupe_items(alapi_result["items"] + giphy_result["items"])
+    return {
+        "items": items,
+        "page": page,
+        "source": "ALAPI+GIPHY",
+        "sources": ["ALAPI", "GIPHY"],
+        "query": query,
+        "resolvedQuery": alapi_result.get("resolvedQuery") or giphy_result.get("resolvedQuery", query),
+        "queryMode": "domestic_plus_fallback",
+        "sortMode": "alapi_then_giphy",
+        "hasMore": bool(alapi_result.get("hasMore") or giphy_result.get("hasMore")),
+    }
 
 
 def proxy_image(url: str) -> tuple[bytes, str]:

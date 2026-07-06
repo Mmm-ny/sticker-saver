@@ -205,6 +205,35 @@ class StickerServerTests(unittest.TestCase):
 
         self.assertEqual(result["source"], "GIPHY")
 
+    @mock.patch("sticker_server.search_giphy")
+    @mock.patch("sticker_server.search_alapi")
+    @mock.patch.dict(os.environ, {"ALAPI_TOKEN": "test-token"}, clear=False)
+    def test_search_stickers_merges_giphy_when_alapi_is_sparse(self, search_alapi, search_giphy):
+        search_alapi.return_value = {
+            "items": [
+                {"id": "alapi-one", "upstreamUrl": "https://example.com/one.gif", "source": "ALAPI"},
+            ],
+            "source": "ALAPI",
+            "resolvedQuery": "haha",
+            "hasMore": False,
+        }
+        search_giphy.return_value = {
+            "items": [
+                {"id": "giphy-duplicate", "originalUrl": "https://example.com/one.gif", "source": "GIPHY"},
+                {"id": "giphy-two", "originalUrl": "https://example.com/two.gif", "source": "GIPHY"},
+            ],
+            "source": "GIPHY",
+            "resolvedQuery": "haha",
+            "hasMore": True,
+        }
+
+        result = sticker_server.search_stickers("鍝堝搱", 1)
+
+        self.assertEqual(result["source"], "ALAPI+GIPHY")
+        self.assertEqual(result["sources"], ["ALAPI", "GIPHY"])
+        self.assertEqual([item["id"] for item in result["items"]], ["alapi-one", "giphy-two"])
+        self.assertTrue(result["hasMore"])
+
     @mock.patch.dict(
         os.environ,
         {"OPENAI_API_KEY": "test-key", "OPENAI_VISION_MODEL": "test-model", "OPENAI_VISION_FALLBACK_MODEL": ""},

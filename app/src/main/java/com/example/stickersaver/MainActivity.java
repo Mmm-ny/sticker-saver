@@ -67,8 +67,10 @@ public class MainActivity extends Activity {
     private EditText serverInput;
     private ProgressBar progressBar;
     private Button loadMoreButton;
+    private TextView resultsMeta;
     private String currentQuery = "";
     private int currentPage = 1;
+    private boolean currentHasMore = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -140,6 +142,17 @@ public class MainActivity extends Activity {
         searchButton.setOnClickListener(v -> search(searchInput.getText().toString(), false));
         searchRow.addView(searchButton, new LinearLayout.LayoutParams(dp(88), dp(48)));
 
+        LinearLayout quickRow = new LinearLayout(this);
+        quickRow.setOrientation(LinearLayout.HORIZONTAL);
+        quickRow.setPadding(0, dp(8), 0, dp(2));
+        root.addView(quickRow, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        ));
+        addQuickSearchButton(quickRow, "哈哈");
+        addQuickSearchButton(quickRow, "无语");
+        addQuickSearchButton(quickRow, "谢谢");
+
         Button pickButton = new Button(this);
         pickButton.setText("选择本地图片/视频搜索");
         pickButton.setOnClickListener(v -> pickLocalMediaForSearch());
@@ -160,6 +173,10 @@ public class MainActivity extends Activity {
 
         TextView resultTitle = sectionTitle("搜索结果");
         root.addView(resultTitle);
+        resultsMeta = new TextView(this);
+        resultsMeta.setTextColor(Color.rgb(108, 108, 108));
+        resultsMeta.setPadding(0, 0, 0, dp(4));
+        root.addView(resultsMeta);
         resultsList = new LinearLayout(this);
         resultsList.setOrientation(LinearLayout.VERTICAL);
         root.addView(resultsList);
@@ -176,6 +193,16 @@ public class MainActivity extends Activity {
         setContentView(scrollView);
     }
 
+    private void addQuickSearchButton(LinearLayout row, String keyword) {
+        Button button = new Button(this);
+        button.setText(keyword);
+        button.setAllCaps(false);
+        button.setOnClickListener(v -> search(keyword, false));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(42), 1);
+        params.setMargins(0, 0, dp(8), 0);
+        row.addView(button, params);
+    }
+
     private TextView sectionTitle(String text) {
         TextView title = new TextView(this);
         title.setText(text);
@@ -189,13 +216,20 @@ public class MainActivity extends Activity {
         String trimmed = query == null ? "" : query.trim();
         currentQuery = trimmed;
         currentPage = 1;
+        currentHasMore = false;
         currentStickers.clear();
         renderResults(currentStickers);
+        resultsMeta.setText("");
         searchInput.setText(trimmed);
         searchPage(trimmed, currentPage, false, silent);
     }
 
     private void loadMoreResults() {
+        if (!currentHasMore) {
+            loadMoreButton.setEnabled(false);
+            loadMoreButton.setText("没有更多结果");
+            return;
+        }
         if (TextUtils.isEmpty(currentQuery)) {
             currentQuery = searchInput.getText().toString().trim();
         }
@@ -210,19 +244,21 @@ public class MainActivity extends Activity {
         executor.execute(() -> {
             try {
                 String url = getSavedServerBaseUrl() + "/api/stickers/search?q=" + Uri.encode(trimmed) + "&page=" + page;
-                String body = new String(downloadBytes(url, null), "UTF-8");
-                List<Sticker> stickers = parseStickers(body);
+                String body = new String(downloadBytes(url, null), StandardCharsets.UTF_8);
+                SearchResult result = parseSearchResult(body);
                 runOnUiThread(() -> {
                     if (!append) {
                         currentStickers.clear();
                     }
-                    currentStickers.addAll(stickers);
+                    currentStickers.addAll(result.stickers);
                     currentPage = page;
+                    currentHasMore = result.hasMore && !result.stickers.isEmpty();
                     setLoading(false, currentStickers.isEmpty() ? "没有找到结果，换个关键词试试" : "已显示 " + currentStickers.size() + " 个表情");
+                    resultsMeta.setText(buildResultsMeta(result, currentStickers.size()));
                     renderResults(currentStickers);
                     loadMoreButton.setVisibility(currentStickers.isEmpty() ? View.GONE : View.VISIBLE);
-                    loadMoreButton.setEnabled(!stickers.isEmpty());
-                    loadMoreButton.setText(stickers.isEmpty() ? "没有更多结果" : "加载更多");
+                    loadMoreButton.setEnabled(currentHasMore);
+                    loadMoreButton.setText(currentHasMore ? "加载更多" : "没有更多结果");
                 });
             } catch (Exception exception) {
                 runOnUiThread(() -> {
@@ -234,30 +270,52 @@ public class MainActivity extends Activity {
         });
     }
 
-    private List<Sticker> parseStickers(String body) throws Exception {
+    private SearchResult parseSearchResult(String body) throws Exception {
         JSONObject root = new JSONObject(body);
         JSONArray items = root.optJSONArray("items");
         List<Sticker> stickers = new ArrayList<>();
-        if (items == null) {
-            return stickers;
-        }
-        for (int i = 0; i < items.length(); i++) {
-            JSONObject item = items.getJSONObject(i);
-            String originalUrl = resolveResultUrl(item.optString("originalUrl", ""));
-            String thumbnailUrl = resolveResultUrl(item.optString("thumbnailUrl", originalUrl));
-            String pageUrl = item.optString("upstreamUrl", item.optString("pageUrl", originalUrl));
-            if (!TextUtils.isEmpty(originalUrl)) {
-                stickers.add(new Sticker(
-                        item.optString("title", "Untitled sticker"),
-                        thumbnailUrl,
-                        originalUrl,
-                        pageUrl,
-                        item.optString("source", "GIPHY"),
-                        item.optString("mimeType", "image/gif")
-                ));
+        if (items != null) {
+            for (int i = 0; i < items.length(); i++) {
+                JSONObject item = items.getJSONObject(i);
+                String originalUrl = resolveResultUrl(item.optString("originalUrl", ""));
+                String thumbnailUrl = resolveResultUrl(item.optString("thumbnailUrl", originalUrl));
+                String pageUrl = item.optString("upstreamUrl", item.optString("pageUrl", originalUrl));
+                if (!TextUtils.isEmpty(originalUrl)) {
+                    stickers.add(new Sticker(
+                            item.optString("title", "Untitled sticker"),
+                            thumbnailUrl,
+                            originalUrl,
+                            pageUrl,
+                            item.optString("source", root.optString("source", "GIPHY")),
+                            item.optString("mimeType", "image/gif")
+                    ));
+                }
             }
         }
-        return stickers;
+        return new SearchResult(
+                stickers,
+                root.optString("source", ""),
+                root.optString("resolvedQuery", root.optString("query", "")),
+                root.optBoolean("hasMore", !stickers.isEmpty())
+        );
+    }
+
+    private String buildResultsMeta(SearchResult result, int totalCount) {
+        if (totalCount <= 0) {
+            return "当前没有结果";
+        }
+        List<String> parts = new ArrayList<>();
+        if (!TextUtils.isEmpty(result.source)) {
+            parts.add("来源 " + result.source);
+        }
+        if (!TextUtils.isEmpty(result.resolvedQuery) && !result.resolvedQuery.equals(currentQuery)) {
+            parts.add("实际搜索 " + result.resolvedQuery);
+        }
+        parts.add("共 " + totalCount + " 个");
+        if (!result.hasMore) {
+            parts.add("已到底");
+        }
+        return TextUtils.join(" · ", parts);
     }
 
     private String resolveResultUrl(String url) {
@@ -272,6 +330,14 @@ public class MainActivity extends Activity {
 
     private void renderResults(List<Sticker> stickers) {
         resultsList.removeAllViews();
+        if (stickers.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText("暂无结果。可以换个关键词，或用本地图片/视频生成搜索词。");
+            empty.setTextColor(Color.rgb(118, 118, 118));
+            empty.setPadding(0, dp(12), 0, dp(12));
+            resultsList.addView(empty);
+            return;
+        }
         for (Sticker sticker : stickers) {
             resultsList.addView(createStickerRow(sticker));
         }
@@ -302,7 +368,7 @@ public class MainActivity extends Activity {
         content.addView(title);
 
         TextView source = new TextView(this);
-        source.setText(sticker.source + " · GIF");
+        source.setText(sticker.source + " · " + displayMimeType(sticker.mimeType));
         source.setTextColor(Color.rgb(100, 100, 100));
         source.setPadding(0, dp(4), 0, dp(6));
         content.addView(source);
@@ -326,11 +392,42 @@ public class MainActivity extends Activity {
                 byte[] data = downloadBytes(sticker.thumbnailUrl, sticker.mimeType);
                 runOnUiThread(() -> gifView.setBytes(data));
             } catch (Exception ignored) {
-                runOnUiThread(() -> source.setText(sticker.source + " · 预览失败"));
+                runOnUiThread(() -> source.setText(sticker.source + " · 预览失败 · " + displayMimeType(sticker.mimeType)));
             }
         });
 
         return row;
+    }
+
+    private String displayMimeType(String mimeType) {
+        String value = mimeType == null ? "" : mimeType.toLowerCase(Locale.US);
+        if (value.contains("gif")) {
+            return "GIF";
+        }
+        if (value.contains("webp")) {
+            return "WEBP";
+        }
+        if (value.contains("png")) {
+            return "PNG";
+        }
+        if (value.contains("jpeg") || value.contains("jpg")) {
+            return "JPG";
+        }
+        return "图片";
+    }
+
+    private String fileExtensionForMime(String mimeType) {
+        String value = mimeType == null ? "" : mimeType.toLowerCase(Locale.US);
+        if (value.contains("gif")) {
+            return ".gif";
+        }
+        if (value.contains("webp")) {
+            return ".webp";
+        }
+        if (value.contains("png")) {
+            return ".png";
+        }
+        return ".jpg";
     }
 
     private void saveRemoteSticker(Sticker sticker) {
@@ -338,7 +435,7 @@ public class MainActivity extends Activity {
         executor.execute(() -> {
             try {
                 byte[] data = downloadBytes(sticker.originalUrl, sticker.mimeType);
-                String extension = sticker.mimeType.contains("gif") ? ".gif" : ".jpg";
+                String extension = fileExtensionForMime(sticker.mimeType);
                 Uri saved = saveToGallery(data, sticker.mimeType, extension);
                 rememberSaved(sticker.title);
                 runOnUiThread(() -> {
@@ -661,7 +758,7 @@ public class MainActivity extends Activity {
                 if (mimeType == null || !mimeType.startsWith("image/")) {
                     mimeType = "image/gif";
                 }
-                String extension = mimeType.contains("gif") ? ".gif" : ".jpg";
+                String extension = fileExtensionForMime(mimeType);
                 saveToGallery(readAll(input), mimeType, extension);
                 rememberSaved("分享的表情");
                 runOnUiThread(() -> {
@@ -770,6 +867,20 @@ public class MainActivity extends Activity {
             this.pageUrl = pageUrl;
             this.source = source;
             this.mimeType = mimeType;
+        }
+    }
+
+    private static class SearchResult {
+        final List<Sticker> stickers;
+        final String source;
+        final String resolvedQuery;
+        final boolean hasMore;
+
+        SearchResult(List<Sticker> stickers, String source, String resolvedQuery, boolean hasMore) {
+            this.stickers = stickers;
+            this.source = source;
+            this.resolvedQuery = resolvedQuery;
+            this.hasMore = hasMore;
         }
     }
 
