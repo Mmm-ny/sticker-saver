@@ -12,6 +12,7 @@ class StickerServerTests(unittest.TestCase):
     def setUp(self):
         sticker_server._request_log.clear()
         sticker_server._baidu_token_cache.clear()
+        sticker_server._search_cache.clear()
 
     def test_normalize_giphy_item(self):
         item = {
@@ -293,6 +294,33 @@ class StickerServerTests(unittest.TestCase):
     @mock.patch("sticker_server.search_giphy")
     @mock.patch("sticker_server.search_alapi")
     @mock.patch.dict(os.environ, {"ALAPI_TOKEN": "test-token"}, clear=False)
+    def test_search_stickers_uses_short_cache(self, search_alapi, search_giphy, search_giphy_stickers):
+        search_alapi.return_value = {
+            "items": [{"id": "alapi-one", "title": "哈哈 表情包", "source": "ALAPI"}],
+            "source": "ALAPI",
+            "sources": ["ALAPI"],
+            "resolvedQuery": "哈哈",
+            "hasMore": False,
+        }
+        search_giphy.return_value = {"items": [], "source": "GIPHY", "sources": ["GIPHY"], "hasMore": False}
+        search_giphy_stickers.return_value = {
+            "items": [],
+            "source": "GIPHY Sticker",
+            "sources": ["GIPHY Sticker"],
+            "hasMore": False,
+        }
+
+        first = sticker_server.search_stickers("哈哈", 1, "hot")
+        second = sticker_server.search_stickers("哈哈", 1, "hot")
+
+        self.assertEqual(first["cache"], "miss")
+        self.assertEqual(second["cache"], "hit")
+        self.assertEqual(search_alapi.call_count, 1)
+
+    @mock.patch("sticker_server.search_giphy_stickers")
+    @mock.patch("sticker_server.search_giphy")
+    @mock.patch("sticker_server.search_alapi")
+    @mock.patch.dict(os.environ, {"ALAPI_TOKEN": "test-token"}, clear=False)
     def test_search_stickers_ranks_relevance_above_domestic_source(self, search_alapi, search_giphy, search_giphy_stickers):
         search_alapi.return_value = {
             "items": [
@@ -317,7 +345,7 @@ class StickerServerTests(unittest.TestCase):
         result = sticker_server.search_stickers("猫猫", 1)
 
         self.assertEqual(result["items"][0]["id"], "giphy-cat")
-        self.assertEqual(result["sortMode"], "relevance_with_domestic_affinity")
+        self.assertEqual(result["sortMode"], "semantic_relevance_domestic_first_cached")
 
     @mock.patch.dict(
         os.environ,

@@ -15,6 +15,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -31,6 +32,13 @@ KLIPY_API_BASE_URL = "https://api.klipy.com"
 RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_MAX_REQUESTS = 30
 SEARCH_PAGE_LIMIT = 24
+SEARCH_CACHE_TTL_SECONDS = 300
+PROVIDER_TIMEOUT_SECONDS = {
+    "ALAPI": 6,
+    "GIPHY": 4,
+    "GIPHY Sticker": 4,
+    "Klipy": 4,
+}
 MAX_ANALYSIS_BODY_BYTES = 6 * 1024 * 1024
 MAX_PROXY_IMAGE_BYTES = 12 * 1024 * 1024
 PROXY_IMAGE_PEEK_BYTES = 4096
@@ -59,8 +67,28 @@ CONTENT_CATEGORIES = {
     "movie": {"name": "影视", "domestic": "影视 表情包", "global": "movie reaction"},
     "wallpaper": {"name": "壁纸", "domestic": "壁纸 动漫", "global": "wallpaper anime"},
 }
+CATEGORY_SEMANTIC_TERMS = {
+    "hot": ["热门", "热梗", "表情包", "斗图", "reaction", "meme", "trending"],
+    "anime": ["动漫", "番剧", "动画", "角色", "anime", "manga", "cartoon"],
+    "acg": ["二次元", "动漫", "ACG", "萌", "番剧", "角色", "anime", "cute"],
+    "funny": ["搞笑", "哈哈", "笑死", "绷不住", "沙雕", "funny", "laugh", "lol"],
+    "cute": ["可爱", "萌", "猫猫", "狗狗", "贴贴", "cute", "kawaii", "cat", "dog"],
+    "game": ["游戏", "手游", "电竞", "角色", "game", "gaming", "player"],
+    "movie": ["影视", "电影", "电视剧", "台词", "movie", "film", "drama"],
+    "wallpaper": ["壁纸", "头像", "背景图", "高清", "wallpaper", "background", "avatar"],
+}
+QUERY_SEMANTIC_TERMS = {
+    "哈哈": ["哈哈", "大笑", "笑死", "乐", "laugh", "lol", "haha"],
+    "笑": ["哈哈", "大笑", "笑死", "laugh", "funny"],
+    "无语": ["无语", "沉默", "尴尬", "speechless", "awkward"],
+    "谢谢": ["谢谢", "感谢", "thank", "thanks"],
+    "猫": ["猫", "猫猫", "喵", "cat", "kitten"],
+    "狗": ["狗", "狗狗", "dog", "puppy"],
+    "哭": ["哭", "流泪", "破防", "cry", "sad"],
+}
 _request_log: dict[str, list[float]] = {}
 _baidu_token_cache: dict[str, Any] = {}
+_search_cache: dict[str, dict[str, Any]] = {}
 
 
 class UpstreamError(Exception):
@@ -211,9 +239,48 @@ def _dedupe_items(items: list[dict[str, Any]], limit: int = SEARCH_PAGE_LIMIT) -
     return deduped
 
 
+def _cache_key(query: str, page: int, category: str) -> str:
+    providers = [
+        "alapi" if os.environ.get("ALAPI_TOKEN") else "",
+        "giphy" if os.environ.get("GIPHY_API_KEY") else "",
+        "klipy" if os.environ.get("KLIPY_API_KEY") else "",
+    ]
+    raw = json.dumps(
+        {
+            "query": (query or "").strip(),
+            "page": max(page, 1),
+            "category": (category or "hot").strip().lower(),
+            "providers": [provider for provider in providers if provider],
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _cached_search_result(query: str, page: int, category: str) -> dict[str, Any] | None:
+    key = _cache_key(query, page, category)
+    cached = _search_cache.get(key)
+    now = time.time()
+    if not cached or cached.get("expires_at", 0) <= now:
+        _search_cache.pop(key, None)
+        return None
+    payload = json.loads(json.dumps(cached["payload"], ensure_ascii=False))
+    payload["cache"] = "hit"
+    return payload
+
+
+def _store_search_result(query: str, page: int, category: str, payload: dict[str, Any]) -> None:
+    _search_cache[_cache_key(query, page, category)] = {
+        "expires_at": time.time() + SEARCH_CACHE_TTL_SECONDS,
+        "payload": json.loads(json.dumps(payload, ensure_ascii=False)),
+    }
+
+
 def _ranking_terms(query: str, category: str) -> list[str]:
     clean_query = (query or "").strip()
     category_key = (category or "hot").strip().lower()
+    semantic_terms = CATEGORY_SEMANTIC_TERMS.get(category_key, [])
     if clean_query and category_key == "hot":
         raw_terms = [clean_query]
     else:
@@ -222,6 +289,10 @@ def _ranking_terms(query: str, category: str) -> list[str]:
             _category_config(category)["domestic"],
             _category_config(category)["global"],
         ]
+    raw_terms.extend(semantic_terms)
+    for key, values in QUERY_SEMANTIC_TERMS.items():
+        if key and key in clean_query:
+            raw_terms.extend(values)
     terms = []
     for raw in raw_terms:
         for part in raw.replace("-", " ").replace("_", " ").split():
@@ -236,16 +307,59 @@ def _ranking_terms(query: str, category: str) -> list[str]:
 
 def _source_affinity(source: str) -> int:
     if source == "ALAPI":
-        return 14
+        return 120
     if source == "Klipy":
-        return 8
+        return 28
     if source == "GIPHY Sticker":
-        return 5
-    return 3
+        return 18
+    return 10
+
+
+def _item_search_haystack(item: dict[str, Any]) -> str:
+    return " ".join(
+        str(item.get(key, ""))
+        for key in ("title", "source", "upstreamUrl", "pageUrl", "originalUrl", "mimeType")
+    ).lower()
+
+
+def _score_search_item(item: dict[str, Any], query: str, category: str, index: int) -> int:
+    terms = _ranking_terms(query, category)
+    haystack = _item_search_haystack(item)
+    source = str(item.get("source", ""))
+    mime_type = str(item.get("mimeType", "")).lower()
+    category_key = (category or "hot").strip().lower()
+    clean_query = (query or "").strip().lower()
+
+    score = max(0, 100 - min(index, 100))
+    score += _source_affinity(source)
+
+    if clean_query and clean_query in haystack:
+        score += 320
+    for term in terms:
+        if not term:
+            continue
+        if term in haystack:
+            score += 180 if (" " in term or len(term) >= 4) else 70
+
+    category_hits = sum(1 for term in CATEGORY_SEMANTIC_TERMS.get(category_key, []) if term.lower() in haystack)
+    score += min(category_hits, 3) * 90
+
+    if source == "ALAPI" and category_hits:
+        score += 80
+    if source != "ALAPI" and not clean_query and category_key != "hot" and not category_hits:
+        score -= 120
+    if category_key == "wallpaper":
+        if any(token in haystack for token in ("wallpaper", "壁纸", "background", "头像")):
+            score += 180
+        if "gif" in mime_type:
+            score -= 60
+    else:
+        if "gif" in mime_type or "webp" in mime_type:
+            score += 35
+    return score
 
 
 def _rank_search_items(items: list[dict[str, Any]], query: str, category: str, limit: int = SEARCH_PAGE_LIMIT) -> list[dict[str, Any]]:
-    terms = _ranking_terms(query, category)
     scored = []
     seen = set()
     for index, item in enumerate(items):
@@ -253,15 +367,7 @@ def _rank_search_items(items: list[dict[str, Any]], query: str, category: str, l
         if identity in seen:
             continue
         seen.add(identity)
-        haystack = " ".join(
-            str(item.get(key, ""))
-            for key in ("title", "source", "upstreamUrl", "pageUrl", "originalUrl")
-        ).lower()
-        score = max(0, 100 - index)
-        for term in terms:
-            if term and term in haystack:
-                score += 220 if " " in term or len(term) >= 4 else 80
-        score += _source_affinity(str(item.get("source", "")))
+        score = _score_search_item(item, query, category, index)
         scored.append((score, item))
     scored.sort(key=lambda pair: pair[0], reverse=True)
     return [item for _, item in scored[:limit]]
@@ -368,6 +474,7 @@ def search_giphy(
     search_url: str = GIPHY_SEARCH_URL,
     source: str = "GIPHY",
     category: str = "hot",
+    timeout: int = PROVIDER_TIMEOUT_SECONDS["GIPHY"],
 ) -> dict[str, Any]:
     api_key = os.environ.get("GIPHY_API_KEY")
     if not api_key:
@@ -389,7 +496,7 @@ def search_giphy(
         url = search_url
 
     request_url = f"{url}?{urllib.parse.urlencode(params)}"
-    with urllib.request.urlopen(request_url, timeout=12) as response:
+    with urllib.request.urlopen(request_url, timeout=timeout) as response:
         raw = response.read()
     payload = json.loads(raw.decode("utf-8"))
     ranked_items = _rank_giphy_items(payload.get("data", []), resolved_query)[:limit]
@@ -408,8 +515,14 @@ def search_giphy(
     }
 
 
-def search_giphy_stickers(query: str, page: int, limit: int = SEARCH_PAGE_LIMIT, category: str = "hot") -> dict[str, Any]:
-    return search_giphy(query, page, limit, GIPHY_STICKERS_SEARCH_URL, "GIPHY Sticker", category)
+def search_giphy_stickers(
+    query: str,
+    page: int,
+    limit: int = SEARCH_PAGE_LIMIT,
+    category: str = "hot",
+    timeout: int = PROVIDER_TIMEOUT_SECONDS["GIPHY Sticker"],
+) -> dict[str, Any]:
+    return search_giphy(query, page, limit, GIPHY_STICKERS_SEARCH_URL, "GIPHY Sticker", category, timeout)
 
 
 def _find_first_url(value: Any) -> str:
@@ -453,7 +566,13 @@ def normalize_klipy_item(item: dict[str, Any], index: int) -> dict[str, Any] | N
     return normalize_external_image_item(url, "Klipy", title, index, page_url)
 
 
-def search_klipy(query: str, page: int, limit: int = SEARCH_PAGE_LIMIT, category: str = "hot") -> dict[str, Any]:
+def search_klipy(
+    query: str,
+    page: int,
+    limit: int = SEARCH_PAGE_LIMIT,
+    category: str = "hot",
+    timeout: int = PROVIDER_TIMEOUT_SECONDS["Klipy"],
+) -> dict[str, Any]:
     app_key = os.environ.get("KLIPY_API_KEY")
     if not app_key:
         raise RuntimeError("KLIPY_API_KEY is not configured")
@@ -473,7 +592,7 @@ def search_klipy(query: str, page: int, limit: int = SEARCH_PAGE_LIMIT, category
         headers={"Accept": "application/json"},
         method="GET",
     )
-    with urllib.request.urlopen(request, timeout=12) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         raw = response.read()
     payload = json.loads(raw.decode("utf-8"))
     items = []
@@ -498,7 +617,30 @@ def search_klipy(query: str, page: int, limit: int = SEARCH_PAGE_LIMIT, category
     }
 
 
-def search_alapi(query: str, page: int, limit: int = SEARCH_PAGE_LIMIT, category: str = "hot") -> dict[str, Any]:
+def _filter_proxyable_urls(urls: list[str], limit: int = SEARCH_PAGE_LIMIT) -> list[str]:
+    if not urls:
+        return []
+    accepted: list[str] = []
+    pool = ThreadPoolExecutor(max_workers=min(8, max(1, len(urls))))
+    try:
+        future_to_url = {pool.submit(can_proxy_image, url): url for url in urls}
+        for future in as_completed(future_to_url):
+            if future.result():
+                accepted.append(future_to_url[future])
+            if len(accepted) >= limit:
+                break
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    return accepted[:limit]
+
+
+def search_alapi(
+    query: str,
+    page: int,
+    limit: int = SEARCH_PAGE_LIMIT,
+    category: str = "hot",
+    timeout: int = PROVIDER_TIMEOUT_SECONDS["ALAPI"],
+) -> dict[str, Any]:
     token = os.environ.get("ALAPI_TOKEN")
     if not token:
         raise RuntimeError("ALAPI_TOKEN is not configured")
@@ -511,7 +653,7 @@ def search_alapi(query: str, page: int, limit: int = SEARCH_PAGE_LIMIT, category
         headers={"Accept": "application/json"},
         method="GET",
     )
-    with urllib.request.urlopen(request, timeout=12) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         raw = response.read()
     payload = json.loads(raw.decode("utf-8"))
     code = payload.get("code")
@@ -519,12 +661,7 @@ def search_alapi(query: str, page: int, limit: int = SEARCH_PAGE_LIMIT, category
         raise RuntimeError(payload.get("message") or f"ALAPI returned code {code}")
 
     candidate_urls = _extract_urls(payload.get("data", {}))[: max(limit * 2, limit)]
-    urls = []
-    for url in candidate_urls:
-        if can_proxy_image(url):
-            urls.append(url)
-        if len(urls) >= limit:
-            break
+    urls = _filter_proxyable_urls(candidate_urls, limit)
     title = f"{query.strip() or '热门'} 表情包"
     return {
         "items": [normalize_url_item(url, "ALAPI", title, index) for index, url in enumerate(urls)],
@@ -542,29 +679,36 @@ def search_alapi(query: str, page: int, limit: int = SEARCH_PAGE_LIMIT, category
 
 
 def search_stickers(query: str, page: int, category: str = "hot") -> dict[str, Any]:
+    cached = _cached_search_result(query, page, category)
+    if cached:
+        return cached
+
     provider_results = []
     errors = []
+    providers = []
     if os.environ.get("ALAPI_TOKEN"):
-        try:
-            provider_results.append(search_alapi(query, page, category=category))
-        except (RuntimeError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            errors.append(f"ALAPI: {exc}")
-            print(f"ALAPI search failed: {exc}")
-
-    providers = [
-        ("GIPHY", lambda: search_giphy(query, page, category=category)),
-        ("GIPHY Sticker", lambda: search_giphy_stickers(query, page, category=category)),
-    ]
+        providers.append(("ALAPI", lambda: search_alapi(query, page, category=category)))
+    providers.extend(
+        [
+            ("GIPHY", lambda: search_giphy(query, page, category=category)),
+            ("GIPHY Sticker", lambda: search_giphy_stickers(query, page, category=category)),
+        ]
+    )
     if os.environ.get("KLIPY_API_KEY"):
         providers.append(("Klipy", lambda: search_klipy(query, page, category=category)))
 
-    for name, search_fn in providers:
-        try:
-            provider_results.append(search_fn())
-        except RuntimeError as exc:
-            errors.append(f"{name}: {exc}")
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            errors.append(f"{name}: {exc}")
+    with ThreadPoolExecutor(max_workers=max(1, len(providers))) as pool:
+        future_to_name = {pool.submit(search_fn): name for name, search_fn in providers}
+        for future in as_completed(future_to_name):
+            name = future_to_name[future]
+            try:
+                result = future.result()
+                if result.get("items"):
+                    provider_results.append(result)
+            except RuntimeError as exc:
+                errors.append(f"{name}: {exc}")
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+                errors.append(f"{name}: {exc}")
 
     if not provider_results:
         raise RuntimeError("; ".join(errors) or "No sticker search provider configured")
@@ -593,11 +737,13 @@ def search_stickers(query: str, page: int, category: str = "hot") -> dict[str, A
         "category": category or "hot",
         "categoryName": _category_name(category),
         "queryMode": "multi_source_ranked",
-        "sortMode": "relevance_with_domestic_affinity",
+        "sortMode": "semantic_relevance_domestic_first_cached",
         "hasMore": has_more,
+        "cache": "miss",
     }
     if errors:
         response["fallbackReason"] = "; ".join(errors)
+    _store_search_result(query, page, category, response)
     return response
 
 
@@ -641,7 +787,7 @@ def can_proxy_image(url: str) -> bool:
         method="GET",
     )
     try:
-        with urllib.request.urlopen(request, timeout=8) as response:
+        with urllib.request.urlopen(request, timeout=3) as response:
             data = response.read(PROXY_IMAGE_PEEK_BYTES)
     except (urllib.error.URLError, TimeoutError, ValueError):
         return False
