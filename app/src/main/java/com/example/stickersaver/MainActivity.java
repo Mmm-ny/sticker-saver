@@ -53,7 +53,17 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
-    private static final String DEFAULT_SERVER_BASE_URL = "http://10.0.2.2:8080";
+    private static final String DEFAULT_SERVER_BASE_URL = "http://47.76.154.20:8080";
+    private static final String LEGACY_EMULATOR_SERVER_BASE_URL = "http://10.0.2.2:8080";
+    private static final int COLOR_BG = 0xFFF4F7FB;
+    private static final int COLOR_CARD = 0xFFFFFFFF;
+    private static final int COLOR_TEXT = 0xFF172033;
+    private static final int COLOR_MUTED = 0xFF657084;
+    private static final int COLOR_PRIMARY = 0xFF2364E8;
+    private static final int COLOR_PRIMARY_DARK = 0xFF1647B8;
+    private static final int COLOR_ACCENT = 0xFF18B6A4;
+    private static final int COLOR_SOFT_BLUE = 0xFFEAF1FF;
+    private static final int COLOR_BORDER = 0xFFE1E7F0;
     private static final int STORAGE_PERMISSION_REQUEST = 42;
     private static final int PICK_MEDIA_SEARCH_REQUEST = 43;
     private static final int ANALYSIS_IMAGE_MAX_SIDE = 640;
@@ -104,104 +114,187 @@ public class MainActivity extends Activity {
 
     private void buildUi() {
         ScrollView scrollView = new ScrollView(this);
+        scrollView.setFillViewport(true);
+        scrollView.setBackgroundColor(COLOR_BG);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(16), dp(18), dp(16), dp(24));
-        root.setBackgroundColor(Color.rgb(250, 250, 250));
+        root.setPadding(dp(16), dp(16), dp(16), dp(24));
+        root.setBackgroundColor(COLOR_BG);
         scrollView.addView(root);
+
+        LinearLayout hero = floatingPanel();
+        hero.setPadding(dp(18), dp(18), dp(18), dp(18));
+        hero.setBackground(gradientBackground(0xFF1E2B57, 0xFF0E9F91, dp(18)));
+        root.addView(hero, fullWidthParams(0, 0, 0, dp(14)));
 
         TextView title = new TextView(this);
         title.setText("表情保存器");
-        title.setTextSize(24);
-        title.setTextColor(Color.rgb(28, 28, 28));
+        title.setTextSize(28);
+        title.setTextColor(Color.WHITE);
         title.setGravity(Gravity.START);
-        root.addView(title);
+        hero.addView(title);
 
         statusText = new TextView(this);
-        statusText.setText("搜索相似动图，保存到手机相册");
-        statusText.setTextColor(Color.rgb(86, 86, 86));
-        statusText.setPadding(0, dp(6), 0, dp(12));
-        root.addView(statusText);
+        statusText.setText("热门表情、动漫二次元、壁纸素材，一处搜索保存");
+        statusText.setTextColor(0xFFE8F5FF);
+        statusText.setPadding(0, dp(8), 0, dp(12));
+        hero.addView(statusText);
+
+        TextView serverBadge = new TextView(this);
+        serverBadge.setText("在线服务  " + DEFAULT_SERVER_BASE_URL);
+        serverBadge.setTextColor(0xFF0E2A47);
+        serverBadge.setTextSize(12);
+        serverBadge.setPadding(dp(12), dp(7), dp(12), dp(7));
+        serverBadge.setBackground(roundedBackground(0xEFFFFFFF, dp(18), 0x66FFFFFF));
+        hero.addView(serverBadge);
+
+        LinearLayout controlPanel = floatingPanel();
+        controlPanel.setPadding(dp(14), dp(14), dp(14), dp(14));
+        root.addView(controlPanel, fullWidthParams(0, 0, 0, dp(14)));
+
+        TextView serverLabel = smallLabel("服务端地址");
+        controlPanel.addView(serverLabel);
 
         serverInput = new EditText(this);
         serverInput.setSingleLine(true);
-        serverInput.setHint("服务端地址，如 http://192.168.1.10:8080");
+        serverInput.setTextSize(14);
+        serverInput.setHint("服务端地址，如 http://47.76.154.20:8080");
         serverInput.setText(getSavedServerBaseUrl());
+        styleInput(serverInput);
         serverInput.setOnFocusChangeListener((view, hasFocus) -> {
             if (!hasFocus) {
                 saveServerBaseUrl(serverInput.getText().toString());
             }
         });
-        root.addView(serverInput, new LinearLayout.LayoutParams(
+        controlPanel.addView(serverInput, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 dp(48)
         ));
 
         LinearLayout searchRow = new LinearLayout(this);
         searchRow.setOrientation(LinearLayout.HORIZONTAL);
-        root.addView(searchRow, new LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams searchRowParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-        ));
+        );
+        searchRowParams.setMargins(0, dp(10), 0, 0);
+        controlPanel.addView(searchRow, searchRowParams);
 
         searchInput = new EditText(this);
         searchInput.setSingleLine(true);
-        searchInput.setHint("输入关键词，如 哈哈、无语、谢谢");
+        searchInput.setTextSize(16);
+        searchInput.setHint("输入关键词，如 哈哈、无语、猫猫");
         searchInput.setText("");
+        styleInput(searchInput);
         searchRow.addView(searchInput, new LinearLayout.LayoutParams(0, dp(48), 1));
 
         Button searchButton = new Button(this);
         searchButton.setText("搜索");
+        searchButton.setTextColor(Color.WHITE);
+        searchButton.setAllCaps(false);
+        searchButton.setBackground(roundedBackground(COLOR_PRIMARY, dp(14), COLOR_PRIMARY));
+        raise(searchButton, 4);
         searchButton.setOnClickListener(v -> search(searchInput.getText().toString(), false));
-        searchRow.addView(searchButton, new LinearLayout.LayoutParams(dp(88), dp(48)));
+        LinearLayout.LayoutParams searchButtonParams = new LinearLayout.LayoutParams(dp(92), dp(48));
+        searchButtonParams.setMargins(dp(10), 0, 0, 0);
+        searchRow.addView(searchButton, searchButtonParams);
 
         Button pickButton = new Button(this);
-        pickButton.setText("选择本地图片/视频搜索");
+        pickButton.setText("根据本地图片/视频智能搜索");
+        pickButton.setTextColor(COLOR_PRIMARY_DARK);
+        pickButton.setAllCaps(false);
+        pickButton.setBackground(roundedBackground(COLOR_SOFT_BLUE, dp(14), 0xFFCAD9FF));
+        raise(pickButton, 2);
         pickButton.setOnClickListener(v -> pickLocalMediaForSearch());
         LinearLayout.LayoutParams pickParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 dp(48)
         );
         pickParams.setMargins(0, dp(10), 0, 0);
-        root.addView(pickButton, pickParams);
+        controlPanel.addView(pickButton, pickParams);
 
+        LinearLayout categoryPanel = floatingPanel();
+        categoryPanel.setPadding(dp(14), dp(12), dp(6), dp(8));
+        root.addView(categoryPanel, fullWidthParams(0, 0, 0, dp(14)));
         TextView categoryTitle = sectionTitle("内容分类");
-        root.addView(categoryTitle);
+        categoryPanel.addView(categoryTitle);
         LinearLayout categoryGrid = new LinearLayout(this);
         categoryGrid.setOrientation(LinearLayout.VERTICAL);
-        root.addView(categoryGrid);
+        categoryPanel.addView(categoryGrid);
         addCategoryRows(categoryGrid);
 
         progressBar = new ProgressBar(this);
         progressBar.setVisibility(View.GONE);
         root.addView(progressBar);
 
+        LinearLayout recentPanel = floatingPanel();
+        recentPanel.setPadding(dp(14), dp(12), dp(14), dp(12));
+        root.addView(recentPanel, fullWidthParams(0, 0, 0, dp(14)));
         TextView recentTitle = sectionTitle("最近保存");
-        root.addView(recentTitle);
+        recentPanel.addView(recentTitle);
         recentList = new LinearLayout(this);
         recentList.setOrientation(LinearLayout.VERTICAL);
-        root.addView(recentList);
+        recentPanel.addView(recentList);
 
+        LinearLayout resultsPanel = floatingPanel();
+        resultsPanel.setPadding(dp(14), dp(12), dp(14), dp(14));
+        root.addView(resultsPanel, fullWidthParams(0, 0, 0, dp(12)));
         TextView resultTitle = sectionTitle("搜索结果");
-        root.addView(resultTitle);
+        resultsPanel.addView(resultTitle);
         resultsMeta = new TextView(this);
-        resultsMeta.setTextColor(Color.rgb(108, 108, 108));
-        resultsMeta.setPadding(0, 0, 0, dp(4));
-        root.addView(resultsMeta);
+        resultsMeta.setTextColor(COLOR_MUTED);
+        resultsMeta.setPadding(0, 0, 0, dp(8));
+        resultsPanel.addView(resultsMeta);
         resultsList = new LinearLayout(this);
         resultsList.setOrientation(LinearLayout.VERTICAL);
-        root.addView(resultsList);
+        resultsPanel.addView(resultsList);
 
         loadMoreButton = new Button(this);
         loadMoreButton.setText("加载更多");
+        loadMoreButton.setAllCaps(false);
+        loadMoreButton.setTextColor(Color.WHITE);
+        loadMoreButton.setBackground(roundedBackground(COLOR_ACCENT, dp(14), COLOR_ACCENT));
         loadMoreButton.setVisibility(View.GONE);
         loadMoreButton.setOnClickListener(v -> loadMoreResults());
-        root.addView(loadMoreButton, new LinearLayout.LayoutParams(
+        resultsPanel.addView(loadMoreButton, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 dp(48)
         ));
 
         setContentView(scrollView);
+    }
+
+    private LinearLayout floatingPanel() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setBackground(roundedBackground(COLOR_CARD, dp(18), COLOR_BORDER));
+        raise(panel, 6);
+        return panel;
+    }
+
+    private LinearLayout.LayoutParams fullWidthParams(int left, int top, int right, int bottom) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        params.setMargins(left, top, right, bottom);
+        return params;
+    }
+
+    private TextView smallLabel(String text) {
+        TextView label = new TextView(this);
+        label.setText(text);
+        label.setTextColor(COLOR_MUTED);
+        label.setTextSize(12);
+        label.setPadding(dp(2), 0, 0, dp(6));
+        return label;
+    }
+
+    private void styleInput(EditText input) {
+        input.setTextColor(COLOR_TEXT);
+        input.setHintTextColor(0xFF9AA5B5);
+        input.setPadding(dp(12), 0, dp(12), 0);
+        input.setBackground(roundedBackground(0xFFF8FAFD, dp(14), COLOR_BORDER));
     }
 
     private void addCategoryRows(LinearLayout parent) {
@@ -240,12 +333,14 @@ public class MainActivity extends Activity {
         for (int i = 0; i < categoryButtons.size(); i++) {
             Button button = categoryButtons.get(i);
             boolean selected = CONTENT_CATEGORIES[i].key.equals(currentCategory);
-            button.setTextColor(selected ? Color.WHITE : Color.rgb(54, 54, 54));
+            button.setTextColor(selected ? Color.WHITE : COLOR_TEXT);
+            button.setAllCaps(false);
             button.setBackground(roundedBackground(
-                    selected ? Color.rgb(34, 113, 227) : Color.rgb(238, 238, 238),
-                    dp(6),
-                    selected ? Color.rgb(34, 113, 227) : Color.rgb(224, 224, 224)
+                    selected ? COLOR_PRIMARY : 0xFFF4F7FB,
+                    dp(14),
+                    selected ? COLOR_PRIMARY : COLOR_BORDER
             ));
+            raise(button, selected ? 4 : 1);
         }
     }
 
@@ -253,8 +348,8 @@ public class MainActivity extends Activity {
         TextView title = new TextView(this);
         title.setText(text);
         title.setTextSize(18);
-        title.setTextColor(Color.rgb(40, 40, 40));
-        title.setPadding(0, dp(18), 0, dp(8));
+        title.setTextColor(COLOR_TEXT);
+        title.setPadding(0, 0, 0, dp(10));
         return title;
     }
 
@@ -410,15 +505,16 @@ public class MainActivity extends Activity {
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setPadding(dp(10), dp(10), dp(10), dp(10));
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setBackground(roundedBackground(Color.WHITE, dp(8), Color.rgb(232, 232, 232)));
+        row.setBackground(roundedBackground(Color.WHITE, dp(16), COLOR_BORDER));
+        raise(row, 3);
 
         FrameLayout previewFrame = new FrameLayout(this);
-        previewFrame.setBackground(roundedBackground(Color.rgb(246, 246, 246), dp(6), Color.rgb(238, 238, 238)));
+        previewFrame.setBackground(gradientBackground(0xFFF7FAFF, 0xFFEAF7F5, dp(14)));
         GifMovieView gifView = new GifMovieView(this);
         previewFrame.addView(gifView, new FrameLayout.LayoutParams(dp(112), dp(112), Gravity.CENTER));
         TextView previewStatus = new TextView(this);
         previewStatus.setText("加载中");
-        previewStatus.setTextColor(Color.rgb(150, 150, 150));
+        previewStatus.setTextColor(COLOR_MUTED);
         previewStatus.setGravity(Gravity.CENTER);
         previewFrame.addView(previewStatus, new FrameLayout.LayoutParams(dp(112), dp(112), Gravity.CENTER));
         row.addView(previewFrame, new LinearLayout.LayoutParams(dp(120), dp(120)));
@@ -430,16 +526,23 @@ public class MainActivity extends Activity {
 
         TextView title = new TextView(this);
         title.setText(sticker.title);
-        title.setTextColor(Color.rgb(36, 36, 36));
+        title.setTextColor(COLOR_TEXT);
         title.setTextSize(15);
         title.setMaxLines(2);
         content.addView(title);
 
         TextView source = new TextView(this);
         source.setText(sticker.source + " · " + displayMimeType(sticker.mimeType));
-        source.setTextColor(Color.rgb(100, 100, 100));
-        source.setPadding(0, dp(4), 0, dp(8));
-        content.addView(source);
+        source.setTextColor(COLOR_PRIMARY_DARK);
+        source.setTextSize(12);
+        source.setPadding(dp(9), dp(4), dp(9), dp(4));
+        source.setBackground(roundedBackground(COLOR_SOFT_BLUE, dp(12), 0xFFD7E2FF));
+        LinearLayout.LayoutParams sourceParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        sourceParams.setMargins(0, dp(6), 0, dp(8));
+        content.addView(source, sourceParams);
 
         LinearLayout actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.HORIZONTAL);
@@ -447,6 +550,9 @@ public class MainActivity extends Activity {
 
         Button saveButton = new Button(this);
         saveButton.setText("保存");
+        saveButton.setAllCaps(false);
+        saveButton.setTextColor(Color.WHITE);
+        saveButton.setBackground(roundedBackground(COLOR_PRIMARY, dp(12), COLOR_PRIMARY));
         saveButton.setOnClickListener(v -> saveRemoteSticker(sticker));
         LinearLayout.LayoutParams actionParams = new LinearLayout.LayoutParams(dp(86), dp(42));
         actionParams.setMargins(0, 0, dp(8), 0);
@@ -454,6 +560,9 @@ public class MainActivity extends Activity {
 
         Button openButton = new Button(this);
         openButton.setText("打开");
+        openButton.setAllCaps(false);
+        openButton.setTextColor(COLOR_PRIMARY_DARK);
+        openButton.setBackground(roundedBackground(0xFFF8FAFD, dp(12), COLOR_BORDER));
         openButton.setOnClickListener(v -> startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(sticker.pageUrl))));
         actions.addView(openButton, new LinearLayout.LayoutParams(dp(86), dp(42)));
 
@@ -485,7 +594,7 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
         );
-        rowParams.setMargins(0, 0, 0, dp(10));
+        rowParams.setMargins(0, 0, 0, dp(12));
         wrapper.addView(row, rowParams);
         return wrapper;
     }
@@ -496,6 +605,21 @@ public class MainActivity extends Activity {
         drawable.setCornerRadius(radius);
         drawable.setStroke(dp(1), strokeColor);
         return drawable;
+    }
+
+    private GradientDrawable gradientBackground(int startColor, int endColor, int radius) {
+        GradientDrawable drawable = new GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                new int[]{startColor, endColor}
+        );
+        drawable.setCornerRadius(radius);
+        return drawable;
+    }
+
+    private void raise(View view, int dpValue) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            view.setElevation(dp(dpValue));
+        }
     }
 
     private String displayMimeType(String mimeType) {
@@ -915,7 +1039,12 @@ public class MainActivity extends Activity {
         if (value == null || value.trim().isEmpty()) {
             return DEFAULT_SERVER_BASE_URL;
         }
-        return trimTrailingSlash(value.trim());
+        String normalized = trimTrailingSlash(value.trim());
+        if (LEGACY_EMULATOR_SERVER_BASE_URL.equals(normalized)) {
+            saveServerBaseUrl(DEFAULT_SERVER_BASE_URL);
+            return DEFAULT_SERVER_BASE_URL;
+        }
+        return normalized;
     }
 
     private void saveServerBaseUrl(String value) {
