@@ -14,6 +14,7 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Movie;
+import android.graphics.drawable.GradientDrawable;
 import android.media.MediaMetadataRetriever;
 import android.net.Uri;
 import android.os.Build;
@@ -57,9 +58,20 @@ public class MainActivity extends Activity {
     private static final int PICK_MEDIA_SEARCH_REQUEST = 43;
     private static final int ANALYSIS_IMAGE_MAX_SIDE = 640;
     private static final int ANALYSIS_IMAGE_MAX_BYTES = 900 * 1024;
+    private static final ContentCategory[] CONTENT_CATEGORIES = new ContentCategory[]{
+            new ContentCategory("hot", "热门"),
+            new ContentCategory("anime", "动漫"),
+            new ContentCategory("acg", "二次元"),
+            new ContentCategory("funny", "搞笑"),
+            new ContentCategory("cute", "可爱"),
+            new ContentCategory("game", "游戏"),
+            new ContentCategory("movie", "影视"),
+            new ContentCategory("wallpaper", "壁纸")
+    };
 
     private final ExecutorService executor = Executors.newFixedThreadPool(4);
     private final List<Sticker> currentStickers = new ArrayList<>();
+    private final List<Button> categoryButtons = new ArrayList<>();
     private LinearLayout resultsList;
     private LinearLayout recentList;
     private TextView statusText;
@@ -69,6 +81,7 @@ public class MainActivity extends Activity {
     private Button loadMoreButton;
     private TextView resultsMeta;
     private String currentQuery = "";
+    private String currentCategory = "hot";
     private int currentPage = 1;
     private boolean currentHasMore = false;
 
@@ -79,7 +92,7 @@ public class MainActivity extends Activity {
         ensureLegacyStoragePermission();
         loadRecentSaves();
         handleIncomingIntent(getIntent());
-        search("哈哈", true);
+        search("", true);
     }
 
     @Override
@@ -134,7 +147,7 @@ public class MainActivity extends Activity {
         searchInput = new EditText(this);
         searchInput.setSingleLine(true);
         searchInput.setHint("输入关键词，如 哈哈、无语、谢谢");
-        searchInput.setText("哈哈");
+        searchInput.setText("");
         searchRow.addView(searchInput, new LinearLayout.LayoutParams(0, dp(48), 1));
 
         Button searchButton = new Button(this);
@@ -142,24 +155,22 @@ public class MainActivity extends Activity {
         searchButton.setOnClickListener(v -> search(searchInput.getText().toString(), false));
         searchRow.addView(searchButton, new LinearLayout.LayoutParams(dp(88), dp(48)));
 
-        LinearLayout quickRow = new LinearLayout(this);
-        quickRow.setOrientation(LinearLayout.HORIZONTAL);
-        quickRow.setPadding(0, dp(8), 0, dp(2));
-        root.addView(quickRow, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-        ));
-        addQuickSearchButton(quickRow, "哈哈");
-        addQuickSearchButton(quickRow, "无语");
-        addQuickSearchButton(quickRow, "谢谢");
-
         Button pickButton = new Button(this);
         pickButton.setText("选择本地图片/视频搜索");
         pickButton.setOnClickListener(v -> pickLocalMediaForSearch());
-        root.addView(pickButton, new LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams pickParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 dp(48)
-        ));
+        );
+        pickParams.setMargins(0, dp(10), 0, 0);
+        root.addView(pickButton, pickParams);
+
+        TextView categoryTitle = sectionTitle("内容分类");
+        root.addView(categoryTitle);
+        LinearLayout categoryGrid = new LinearLayout(this);
+        categoryGrid.setOrientation(LinearLayout.VERTICAL);
+        root.addView(categoryGrid);
+        addCategoryRows(categoryGrid);
 
         progressBar = new ProgressBar(this);
         progressBar.setVisibility(View.GONE);
@@ -193,14 +204,49 @@ public class MainActivity extends Activity {
         setContentView(scrollView);
     }
 
-    private void addQuickSearchButton(LinearLayout row, String keyword) {
-        Button button = new Button(this);
-        button.setText(keyword);
-        button.setAllCaps(false);
-        button.setOnClickListener(v -> search(keyword, false));
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(42), 1);
-        params.setMargins(0, 0, dp(8), 0);
-        row.addView(button, params);
+    private void addCategoryRows(LinearLayout parent) {
+        LinearLayout row = null;
+        for (int i = 0; i < CONTENT_CATEGORIES.length; i++) {
+            if (i % 4 == 0) {
+                row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                );
+                rowParams.setMargins(0, 0, 0, dp(8));
+                parent.addView(row, rowParams);
+            }
+            ContentCategory category = CONTENT_CATEGORIES[i];
+            Button button = new Button(this);
+            button.setText(category.label);
+            button.setAllCaps(false);
+            button.setOnClickListener(v -> selectCategory(category.key));
+            categoryButtons.add(button);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(40), 1);
+            params.setMargins(0, 0, dp(8), 0);
+            row.addView(button, params);
+        }
+        updateCategoryButtons();
+    }
+
+    private void selectCategory(String categoryKey) {
+        currentCategory = categoryKey == null || categoryKey.trim().isEmpty() ? "hot" : categoryKey;
+        updateCategoryButtons();
+        search(searchInput.getText().toString(), false);
+    }
+
+    private void updateCategoryButtons() {
+        for (int i = 0; i < categoryButtons.size(); i++) {
+            Button button = categoryButtons.get(i);
+            boolean selected = CONTENT_CATEGORIES[i].key.equals(currentCategory);
+            button.setTextColor(selected ? Color.WHITE : Color.rgb(54, 54, 54));
+            button.setBackground(roundedBackground(
+                    selected ? Color.rgb(34, 113, 227) : Color.rgb(238, 238, 238),
+                    dp(6),
+                    selected ? Color.rgb(34, 113, 227) : Color.rgb(224, 224, 224)
+            ));
+        }
     }
 
     private TextView sectionTitle(String text) {
@@ -243,7 +289,10 @@ public class MainActivity extends Activity {
         setLoading(true, append ? "正在加载更多..." : silent ? "正在加载热门表情..." : "正在搜索...");
         executor.execute(() -> {
             try {
-                String url = getSavedServerBaseUrl() + "/api/stickers/search?q=" + Uri.encode(trimmed) + "&page=" + page;
+                String url = getSavedServerBaseUrl()
+                        + "/api/stickers/search?q=" + Uri.encode(trimmed)
+                        + "&page=" + page
+                        + "&category=" + Uri.encode(currentCategory);
                 String body = new String(downloadBytes(url, null), StandardCharsets.UTF_8);
                 SearchResult result = parseSearchResult(body);
                 runOnUiThread(() -> {
@@ -296,6 +345,7 @@ public class MainActivity extends Activity {
                 stickers,
                 root.optString("source", ""),
                 root.optString("resolvedQuery", root.optString("query", "")),
+                root.optString("categoryName", categoryLabel(currentCategory)),
                 root.optBoolean("hasMore", !stickers.isEmpty())
         );
     }
@@ -305,6 +355,9 @@ public class MainActivity extends Activity {
             return "当前没有结果";
         }
         List<String> parts = new ArrayList<>();
+        if (!TextUtils.isEmpty(result.categoryName)) {
+            parts.add(result.categoryName);
+        }
         if (!TextUtils.isEmpty(result.source)) {
             parts.add("来源 " + result.source);
         }
@@ -316,6 +369,15 @@ public class MainActivity extends Activity {
             parts.add("已到底");
         }
         return TextUtils.join(" · ", parts);
+    }
+
+    private String categoryLabel(String key) {
+        for (ContentCategory category : CONTENT_CATEGORIES) {
+            if (category.key.equals(key)) {
+                return category.label;
+            }
+        }
+        return "热门";
     }
 
     private String resolveResultUrl(String url) {
@@ -346,13 +408,19 @@ public class MainActivity extends Activity {
     private View createStickerRow(Sticker sticker) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setPadding(0, dp(8), 0, dp(8));
+        row.setPadding(dp(10), dp(10), dp(10), dp(10));
         row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBackground(roundedBackground(Color.WHITE, dp(8), Color.rgb(232, 232, 232)));
 
         FrameLayout previewFrame = new FrameLayout(this);
-        previewFrame.setBackgroundColor(Color.WHITE);
+        previewFrame.setBackground(roundedBackground(Color.rgb(246, 246, 246), dp(6), Color.rgb(238, 238, 238)));
         GifMovieView gifView = new GifMovieView(this);
         previewFrame.addView(gifView, new FrameLayout.LayoutParams(dp(112), dp(112), Gravity.CENTER));
+        TextView previewStatus = new TextView(this);
+        previewStatus.setText("加载中");
+        previewStatus.setTextColor(Color.rgb(150, 150, 150));
+        previewStatus.setGravity(Gravity.CENTER);
+        previewFrame.addView(previewStatus, new FrameLayout.LayoutParams(dp(112), dp(112), Gravity.CENTER));
         row.addView(previewFrame, new LinearLayout.LayoutParams(dp(120), dp(120)));
 
         LinearLayout content = new LinearLayout(this);
@@ -370,7 +438,7 @@ public class MainActivity extends Activity {
         TextView source = new TextView(this);
         source.setText(sticker.source + " · " + displayMimeType(sticker.mimeType));
         source.setTextColor(Color.rgb(100, 100, 100));
-        source.setPadding(0, dp(4), 0, dp(6));
+        source.setPadding(0, dp(4), 0, dp(8));
         content.addView(source);
 
         LinearLayout actions = new LinearLayout(this);
@@ -380,23 +448,54 @@ public class MainActivity extends Activity {
         Button saveButton = new Button(this);
         saveButton.setText("保存");
         saveButton.setOnClickListener(v -> saveRemoteSticker(sticker));
-        actions.addView(saveButton, new LinearLayout.LayoutParams(dp(86), dp(44)));
+        LinearLayout.LayoutParams actionParams = new LinearLayout.LayoutParams(dp(86), dp(42));
+        actionParams.setMargins(0, 0, dp(8), 0);
+        actions.addView(saveButton, actionParams);
 
         Button openButton = new Button(this);
         openButton.setText("打开");
         openButton.setOnClickListener(v -> startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(sticker.pageUrl))));
-        actions.addView(openButton, new LinearLayout.LayoutParams(dp(86), dp(44)));
+        actions.addView(openButton, new LinearLayout.LayoutParams(dp(86), dp(42)));
 
         executor.execute(() -> {
             try {
                 byte[] data = downloadBytes(sticker.thumbnailUrl, sticker.mimeType);
-                runOnUiThread(() -> gifView.setBytes(data));
+                runOnUiThread(() -> {
+                    gifView.setBytes(data);
+                    previewStatus.setVisibility(gifView.hasImage() ? View.GONE : View.VISIBLE);
+                    if (!gifView.hasImage()) {
+                        previewStatus.setText("预览失败");
+                    }
+                });
             } catch (Exception ignored) {
-                runOnUiThread(() -> source.setText(sticker.source + " · 预览失败 · " + displayMimeType(sticker.mimeType)));
+                runOnUiThread(() -> {
+                    previewStatus.setText("预览失败");
+                    previewStatus.setVisibility(View.VISIBLE);
+                    source.setText(sticker.source + " · 预览失败 · " + displayMimeType(sticker.mimeType));
+                    currentStickers.remove(sticker);
+                    renderResults(currentStickers);
+                    resultsMeta.setText("已隐藏无法预览的图片 · 当前 " + currentStickers.size() + " 个");
+                });
             }
         });
 
-        return row;
+        LinearLayout wrapper = new LinearLayout(this);
+        wrapper.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        rowParams.setMargins(0, 0, 0, dp(10));
+        wrapper.addView(row, rowParams);
+        return wrapper;
+    }
+
+    private GradientDrawable roundedBackground(int color, int radius, int strokeColor) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(color);
+        drawable.setCornerRadius(radius);
+        drawable.setStroke(dp(1), strokeColor);
+        return drawable;
     }
 
     private String displayMimeType(String mimeType) {
@@ -874,13 +973,25 @@ public class MainActivity extends Activity {
         final List<Sticker> stickers;
         final String source;
         final String resolvedQuery;
+        final String categoryName;
         final boolean hasMore;
 
-        SearchResult(List<Sticker> stickers, String source, String resolvedQuery, boolean hasMore) {
+        SearchResult(List<Sticker> stickers, String source, String resolvedQuery, String categoryName, boolean hasMore) {
             this.stickers = stickers;
             this.source = source;
             this.resolvedQuery = resolvedQuery;
+            this.categoryName = categoryName;
             this.hasMore = hasMore;
+        }
+    }
+
+    private static class ContentCategory {
+        final String key;
+        final String label;
+
+        ContentCategory(String key, String label) {
+            this.key = key;
+            this.label = label;
         }
     }
 
@@ -908,6 +1019,10 @@ public class MainActivity extends Activity {
             bitmap = movie == null ? BitmapFactory.decodeByteArray(bytes, 0, bytes.length) : null;
             startTime = android.os.SystemClock.uptimeMillis();
             invalidate();
+        }
+
+        public boolean hasImage() {
+            return movie != null || bitmap != null;
         }
 
         @Override

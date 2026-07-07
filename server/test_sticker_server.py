@@ -130,7 +130,11 @@ class StickerServerTests(unittest.TestCase):
                 }
             ]
         }
-        urlopen.return_value.__enter__.return_value.read.return_value = json.dumps(payload).encode("utf-8")
+        api_response = mock.MagicMock()
+        api_response.__enter__().read.return_value = json.dumps(payload).encode("utf-8")
+        image_response = mock.MagicMock()
+        image_response.__enter__().read.return_value = b"GIF89a"
+        urlopen.side_effect = [api_response, image_response]
 
         result = sticker_server.search_giphy("thanks", 2, limit=1)
 
@@ -157,9 +161,33 @@ class StickerServerTests(unittest.TestCase):
         self.assertEqual(parsed["limit"], ["48"])
         self.assertNotIn("lang", parsed)
 
-    @mock.patch.dict(os.environ, {"ALAPI_TOKEN": "test-token"}, clear=False)
+    @mock.patch.dict(os.environ, {"KLIPY_API_KEY": "klipy-key"}, clear=False)
     @mock.patch("urllib.request.urlopen")
-    def test_search_alapi_maps_response(self, urlopen):
+    def test_search_klipy_maps_response(self, urlopen):
+        payload = {
+            "data": [
+                {
+                    "title": "funny cat",
+                    "slug": "funny-cat",
+                    "images": {"original": {"url": "https://cdn.example.com/cat.gif"}},
+                    "share_url": "https://klipy.example.com/cat",
+                }
+            ]
+        }
+        urlopen.return_value.__enter__.return_value.read.return_value = json.dumps(payload).encode("utf-8")
+
+        result = sticker_server.search_klipy("cat", 1, limit=1)
+
+        self.assertEqual(result["source"], "Klipy")
+        self.assertEqual(result["items"][0]["source"], "Klipy")
+        self.assertEqual(result["items"][0]["upstreamUrl"], "https://cdn.example.com/cat.gif")
+        request = urlopen.call_args.args[0]
+        self.assertIn("/api/v1/klipy-key/gifs/search", request.full_url)
+
+    @mock.patch("urllib.request.urlopen")
+    @mock.patch("sticker_server.can_proxy_image", return_value=True)
+    @mock.patch.dict(os.environ, {"ALAPI_TOKEN": "test-token"}, clear=False)
+    def test_search_alapi_maps_response(self, can_proxy_image, urlopen):
         payload = {
             "code": 200,
             "message": "success",
@@ -182,17 +210,44 @@ class StickerServerTests(unittest.TestCase):
         self.assertEqual(params["page"], ["2"])
 
     @mock.patch("urllib.request.urlopen")
+    @mock.patch("sticker_server.can_proxy_image", return_value=True)
+    @mock.patch.dict(os.environ, {"ALAPI_TOKEN": "test-token"}, clear=False)
+    def test_search_alapi_applies_category_query(self, can_proxy_image, urlopen):
+        payload = {
+            "code": 200,
+            "message": "success",
+            "data": {"data": ["https://example.com/anime.gif"]},
+        }
+        urlopen.return_value.__enter__.return_value.read.return_value = json.dumps(payload).encode("utf-8")
+
+        result = sticker_server.search_alapi("", 1, limit=1, category="anime")
+
+        self.assertEqual(result["categoryName"], "动漫")
+        request = urlopen.call_args.args[0]
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(request.full_url).query)
+        self.assertEqual(params["keyword"], ["动漫"])
+
+    @mock.patch("urllib.request.urlopen")
     def test_proxy_image_returns_image_bytes(self, urlopen):
         response = urlopen.return_value.__enter__.return_value
         response.headers.get.return_value = "image/png"
-        response.read.return_value = b"png-data"
+        response.read.return_value = b"\x89PNG\r\n\x1a\npng-data"
 
         data, content_type = sticker_server.proxy_image("http://i0.hdslb.com/test.png")
 
-        self.assertEqual(data, b"png-data")
+        self.assertEqual(data, b"\x89PNG\r\n\x1a\npng-data")
         self.assertEqual(content_type, "image/png")
         request = urlopen.call_args.args[0]
         self.assertEqual(request.full_url, "http://i0.hdslb.com/test.png")
+
+    @mock.patch("urllib.request.urlopen")
+    def test_proxy_image_rejects_non_image_body(self, urlopen):
+        response = urlopen.return_value.__enter__.return_value
+        response.headers.get.return_value = "text/html"
+        response.read.return_value = b"<html>forbidden</html>"
+
+        with self.assertRaises(ValueError):
+            sticker_server.proxy_image("http://example.com/not-image.jpg")
 
     @mock.patch("sticker_server.search_giphy")
     @mock.patch("sticker_server.search_alapi")
@@ -233,6 +288,36 @@ class StickerServerTests(unittest.TestCase):
         self.assertEqual(result["sources"], ["ALAPI", "GIPHY"])
         self.assertEqual([item["id"] for item in result["items"]], ["alapi-one", "giphy-two"])
         self.assertTrue(result["hasMore"])
+
+    @mock.patch("sticker_server.search_giphy_stickers")
+    @mock.patch("sticker_server.search_giphy")
+    @mock.patch("sticker_server.search_alapi")
+    @mock.patch.dict(os.environ, {"ALAPI_TOKEN": "test-token"}, clear=False)
+    def test_search_stickers_ranks_relevance_above_domestic_source(self, search_alapi, search_giphy, search_giphy_stickers):
+        search_alapi.return_value = {
+            "items": [
+                {"id": "alapi-generic", "title": "热门 表情包", "upstreamUrl": "https://example.com/generic.gif", "source": "ALAPI"},
+            ],
+            "source": "ALAPI",
+            "sources": ["ALAPI"],
+            "resolvedQuery": "猫猫",
+            "hasMore": False,
+        }
+        search_giphy.return_value = {
+            "items": [
+                {"id": "giphy-cat", "title": "猫猫 生气 表情包", "originalUrl": "https://example.com/cat.gif", "source": "GIPHY"},
+            ],
+            "source": "GIPHY",
+            "sources": ["GIPHY"],
+            "resolvedQuery": "猫猫",
+            "hasMore": False,
+        }
+        search_giphy_stickers.return_value = {"items": [], "source": "GIPHY Sticker", "sources": ["GIPHY Sticker"], "hasMore": False}
+
+        result = sticker_server.search_stickers("猫猫", 1)
+
+        self.assertEqual(result["items"][0]["id"], "giphy-cat")
+        self.assertEqual(result["sortMode"], "relevance_with_domestic_affinity")
 
     @mock.patch.dict(
         os.environ,
